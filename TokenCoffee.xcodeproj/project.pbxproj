@@ -33,7 +33,9 @@
 		8E44467D7F4FC5A0FB92A3BF /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 309606A2AD4618DE1244CDB8 /* AppModel.swift */; };
 		91654AE1616EAC17E37D1063 /* DemoQuotaData.json in Resources */ = {isa = PBXBuildFile; fileRef = 0FAC0F5A9603A4F9B39D3800 /* DemoQuotaData.json */; };
 		9BAAD393FA0C312BFAEEB322 /* TokenCoffeeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91866704F00A6C51FF289D6A /* TokenCoffeeApp.swift */; };
+		9E224909D842565747B0B742 /* QuotaGraphPerceptualPaletteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEF3C982EB7C356F4B4B31B1 /* QuotaGraphPerceptualPaletteTests.swift */; };
 		9E74088D68D183844045E6F0 /* QuotaHistoryWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18E81E0B4F04FE2D855436D9 /* QuotaHistoryWindow.swift */; };
+		9EAC015561A9C5E9326E3824 /* QuotaGraphPerceptualPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95407346610322E866CF3FAE /* QuotaGraphPerceptualPalette.swift */; };
 		A56C8CB7F9105F199C4317FE /* QuotaForecastDiagnosticExporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA43224604BB416301D09F6A /* QuotaForecastDiagnosticExporterTests.swift */; };
 		AE77846898F64E86C94300CB /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7177466CEF89C89EC8B61148 /* IOKit.framework */; };
 		B72C4AEF9F38890D67173855 /* TokenCoffeeCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EA274434F4C69B881FDBF2F8 /* TokenCoffeeCore.framework */; };
@@ -135,6 +137,7 @@
 		91866704F00A6C51FF289D6A /* TokenCoffeeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenCoffeeApp.swift; sourceTree = "<group>"; };
 		93463707FA87FD54AA98CFAC /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		93BBAFF32DE0999AB7B00486 /* CodexRateLimitClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexRateLimitClient.swift; sourceTree = "<group>"; };
+		95407346610322E866CF3FAE /* QuotaGraphPerceptualPalette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuotaGraphPerceptualPalette.swift; sourceTree = "<group>"; };
 		AA43224604BB416301D09F6A /* QuotaForecastDiagnosticExporterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuotaForecastDiagnosticExporterTests.swift; sourceTree = "<group>"; };
 		AB49006602A950ADB340B435 /* Token Coffee.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Token Coffee.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B0C5145E0C5927208B1F27B7 /* TokenCoffee.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = TokenCoffee.entitlements; sourceTree = "<group>"; };
@@ -149,6 +152,7 @@
 		DAE6FFD288FA2AD75A829908 /* StatusPanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusPanelController.swift; sourceTree = "<group>"; };
 		DE7AD1A297019BC7C543926B /* PowerSessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PowerSessionController.swift; sourceTree = "<group>"; };
 		DED6C0470DD8DB198B0BEE63 /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = System/Library/Frameworks/AppKit.framework; sourceTree = SDKROOT; };
+		DEF3C982EB7C356F4B4B31B1 /* QuotaGraphPerceptualPaletteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuotaGraphPerceptualPaletteTests.swift; sourceTree = "<group>"; };
 		E27E4F4CA638E9727B0FD9D7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		EA274434F4C69B881FDBF2F8 /* TokenCoffeeCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = TokenCoffeeCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		F7CF74AE3A35B9AD89C0E79E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -202,6 +206,7 @@
 				B9C3187BF6FB3997BBC1E839 /* DashboardView.swift */,
 				E27E4F4CA638E9727B0FD9D7 /* Info.plist */,
 				0F723B70B68EC1ABF330D3EB /* PanelControlMenu.swift */,
+				95407346610322E866CF3FAE /* QuotaGraphPerceptualPalette.swift */,
 				18E81E0B4F04FE2D855436D9 /* QuotaHistoryWindow.swift */,
 				FC1C73A26484DD327BF9F874 /* QuotaSyncStatus.swift */,
 				DAE6FFD288FA2AD75A829908 /* StatusPanelController.swift */,
@@ -280,6 +285,7 @@
 			children = (
 				CB3FDD37C3C09807AF107293 /* CloudQuotaSampleSyncPolicyTests.swift */,
 				6A4C0A69DDF7D0BA76AECBF1 /* QuotaGraphDisplaySamplerTests.swift */,
+				DEF3C982EB7C356F4B4B31B1 /* QuotaGraphPerceptualPaletteTests.swift */,
 			);
 			name = TokenCoffeeAppTests;
 			path = Tests/TokenCoffeeAppTests;
@@ -460,6 +466,7 @@
 				40E2BA4DD4D75AFB6944C3BD /* CloudQuotaSampleSyncService.swift in Sources */,
 				12E041F3B81610E4C9B4E708 /* DashboardView.swift in Sources */,
 				E8B65880477127AA57C600D0 /* PanelControlMenu.swift in Sources */,
+				9EAC015561A9C5E9326E3824 /* QuotaGraphPerceptualPalette.swift in Sources */,
 				9E74088D68D183844045E6F0 /* QuotaHistoryWindow.swift in Sources */,
 				C1BEB0ED90F1D712DE1A9839 /* QuotaSyncStatus.swift in Sources */,
 				B7FCF9112D2FF1984F036205 /* StatusPanelController.swift in Sources */,
@@ -473,6 +480,7 @@
 			files = (
 				6E7AEB39C0022DE3B6F46307 /* CloudQuotaSampleSyncPolicyTests.swift in Sources */,
 				0BA7A7B1F9D98874A525D338 /* QuotaGraphDisplaySamplerTests.swift in Sources */,
+				9E224909D842565747B0B742 /* QuotaGraphPerceptualPaletteTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

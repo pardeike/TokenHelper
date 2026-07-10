@@ -475,12 +475,19 @@ private struct QuotaGraphView: View {
     let snapshot: RateLimitSnapshot?
     let now: Date
 
+    @Environment(\.self) private var environment
+
     var body: some View {
         if let resetDate = projection.weeklyResetDate {
             let startDate = QuotaHistoryWindow.startDate(resetDate: resetDate)
             let dayBands = QuotaGraphTimeAxis.dayBands(startDate: startDate, resetDate: resetDate)
             let plotStartDate = dayBands.first?.startDate ?? startDate
             let plotEndDate = dayBands.last?.endDate ?? resetDate
+            let palette = QuotaGraphPerceptualPalette(
+                plotBase: QuotaGraphLinearRGB(
+                    resolved: Color(nsColor: .windowBackgroundColor).resolve(in: environment)
+                )
+            )
             Chart {
                 ForEach(dayBands) { band in
                     RectangleMark(
@@ -489,17 +496,26 @@ private struct QuotaGraphView: View {
                         yStart: .value("Low", 0),
                         yEnd: .value("High", graphCeiling)
                     )
-                    .foregroundStyle(band.isHighlighted ? Color.primary.opacity(0.035) : Color.clear)
+                    .foregroundStyle(band.isLight ? palette.lightDay.color : palette.darkDay.color)
                 }
 
-                ForEach(intensityBands(startDate: startDate, resetDate: resetDate)) { band in
+                ForEach(
+                    QuotaGraphTimeAxis.intensityBands(
+                        runs: projection.cycleRunForecast?.observedIntensityRuns ?? [],
+                        dayBands: dayBands,
+                        startDate: startDate,
+                        resetDate: resetDate
+                    )
+                ) { band in
                     RectangleMark(
                         xStart: .value("Intensity Start", band.startDate),
                         xEnd: .value("Intensity End", band.endDate),
                         yStart: .value("Low", 0),
                         yEnd: .value("High", graphCeiling)
                     )
-                    .foregroundStyle(Color.orange.opacity(0.13))
+                    .foregroundStyle(
+                        band.isLight ? palette.lightIntensity.color : palette.darkIntensity.color
+                    )
                 }
 
                 if plotStartDate < startDate {
@@ -509,7 +525,7 @@ private struct QuotaGraphView: View {
                         yStart: .value("Low", 0),
                         yEnd: .value("High", graphCeiling)
                     )
-                    .foregroundStyle(Color.black.opacity(0.28))
+                    .foregroundStyle(outsideWindowColor)
                 }
 
                 if resetDate < plotEndDate {
@@ -519,7 +535,7 @@ private struct QuotaGraphView: View {
                         yStart: .value("Low", 0),
                         yEnd: .value("High", graphCeiling)
                     )
-                    .foregroundStyle(Color.black.opacity(0.28))
+                    .foregroundStyle(outsideWindowColor)
                 }
 
                 ForEach(QuotaGraphTimeAxis.dayBoundaries(startDate: plotStartDate, resetDate: plotEndDate)) { boundary in
@@ -566,7 +582,11 @@ private struct QuotaGraphView: View {
                     }
                 }
 
-                RuleMark(y: .value("Limit", 100))
+                RuleMark(
+                    xStart: .value("Limit Start", startDate),
+                    xEnd: .value("Limit End", resetDate),
+                    y: .value("Limit", 100)
+                )
                     .foregroundStyle(.red.opacity(0.5))
                     .lineStyle(StrokeStyle(lineWidth: 1))
 
@@ -594,17 +614,19 @@ private struct QuotaGraphView: View {
                 }
             }
             .chartPlotStyle { plotArea in
-                plotArea.overlay {
-                    if let cycleForecast = projection.cycleRunForecast {
-                        CycleForecastCorridorOverlay(
-                            forecast: cycleForecast,
-                            plotStartDate: plotStartDate,
-                            plotEndDate: plotEndDate,
-                            ceiling: graphCeiling
-                        )
-                        .allowsHitTesting(false)
+                plotArea
+                    .background(palette.plotBase.color)
+                    .overlay {
+                        if let cycleForecast = projection.cycleRunForecast {
+                            CycleForecastCorridorOverlay(
+                                forecast: cycleForecast,
+                                plotStartDate: plotStartDate,
+                                plotEndDate: plotEndDate,
+                                ceiling: graphCeiling
+                            )
+                            .allowsHitTesting(false)
+                        }
                     }
-                }
             }
             .clipped()
         } else {
@@ -615,21 +637,6 @@ private struct QuotaGraphView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-        }
-    }
-
-    private func intensityBands(startDate: Date, resetDate: Date) -> [IntensityBand] {
-        guard let forecast = projection.cycleRunForecast else {
-            return []
-        }
-
-        return forecast.observedIntensityRuns.enumerated().compactMap { index, run in
-            let bandStart = max(startDate, run.startDate)
-            let bandEnd = min(resetDate, run.endDate)
-            guard bandEnd.timeIntervalSince(bandStart) >= 60 else {
-                return nil
-            }
-            return IntensityBand(index: index, startDate: bandStart, endDate: bandEnd)
         }
     }
 
@@ -702,6 +709,10 @@ private struct QuotaGraphView: View {
         min(graphCeiling, max(0, value))
     }
 
+    private var outsideWindowColor: Color {
+        Color.black.opacity(0.62)
+    }
+
     private var graphCeiling: Double {
         let projectedHigh = projection.cycleRunForecast?.highProjectedWeeklyUsedPercentAtReset
             ?? projection.projectedWeeklyUsedPercentAtReset
@@ -728,7 +739,6 @@ enum QuotaGraphTimeAxis {
 
         var bands: [QuotaGraphDayBand] = []
         var bandStart = cycleBoundary(onOrBefore: startDate, calendar: calendar)
-        let firstDayOrdinal = calendar.ordinality(of: .day, in: .era, for: bandStart) ?? 0
         var index = 0
 
         while bandStart < resetDate {
@@ -738,7 +748,7 @@ enum QuotaGraphTimeAxis {
                     index: index,
                     startDate: bandStart,
                     endDate: bandEnd,
-                    isHighlighted: (firstDayOrdinal + index).isMultiple(of: 2)
+                    isLight: index.isMultiple(of: 2)
                 )
             )
 
@@ -772,6 +782,45 @@ enum QuotaGraphTimeAxis {
         return boundaries
     }
 
+    static func intensityBands(
+        runs: [QuotaForecastRun],
+        dayBands: [QuotaGraphDayBand],
+        startDate: Date,
+        resetDate: Date
+    ) -> [QuotaGraphIntensityBand] {
+        guard startDate < resetDate,
+              dayBands.isEmpty == false else {
+            return []
+        }
+
+        var intensityBands: [QuotaGraphIntensityBand] = []
+        for run in runs {
+            let runStart = max(startDate, run.startDate)
+            let runEnd = min(resetDate, run.endDate)
+            guard runEnd.timeIntervalSince(runStart) >= 60 else {
+                continue
+            }
+
+            for dayBand in dayBands {
+                let segmentStart = max(runStart, dayBand.startDate)
+                let segmentEnd = min(runEnd, dayBand.endDate)
+                guard segmentStart < segmentEnd else {
+                    continue
+                }
+
+                intensityBands.append(
+                    QuotaGraphIntensityBand(
+                        index: intensityBands.count,
+                        startDate: segmentStart,
+                        endDate: segmentEnd,
+                        isLight: dayBand.isLight
+                    )
+                )
+            }
+        }
+        return intensityBands
+    }
+
     private static func cycleBoundary(onOrBefore date: Date, calendar: Calendar) -> Date {
         calendar.startOfDay(for: date)
     }
@@ -781,7 +830,7 @@ struct QuotaGraphDayBand: Equatable, Identifiable {
     let index: Int
     let startDate: Date
     let endDate: Date
-    let isHighlighted: Bool
+    let isLight: Bool
 
     var id: Int { index }
 }
@@ -793,10 +842,11 @@ struct QuotaGraphDayBoundary: Equatable, Identifiable {
     var id: Int { index }
 }
 
-private struct IntensityBand: Identifiable {
+struct QuotaGraphIntensityBand: Equatable, Identifiable {
     let index: Int
     let startDate: Date
     let endDate: Date
+    let isLight: Bool
 
     var id: Int { index }
 }

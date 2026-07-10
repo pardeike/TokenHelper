@@ -141,11 +141,109 @@ final class CloudQuotaSampleSyncPolicyTests: XCTestCase {
         XCTAssertTrue(bands.allSatisfy { $0.endDate.timeIntervalSince($0.startDate) == 24 * 60 * 60 })
         XCTAssertTrue(try XCTUnwrap(bands.first?.startDate) < start)
         XCTAssertTrue(try XCTUnwrap(bands.last?.endDate) > reset)
+        XCTAssertEqual(bands.first?.isLight, true)
         XCTAssertTrue(
             zip(bands, bands.dropFirst()).allSatisfy {
-                $0.endDate == $1.startDate && $0.isHighlighted != $1.isHighlighted
+                $0.endDate == $1.startDate && $0.isLight != $1.isLight
             }
         )
+    }
+
+    func testGraphDayBandsMatchFridayToFridayWindowAtLocalMidnights() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Europe/Stockholm"))
+        let start = date(year: 2026, month: 7, day: 10, hour: 21, minute: 38, calendar: calendar)
+        let reset = date(year: 2026, month: 7, day: 17, hour: 21, minute: 38, calendar: calendar)
+
+        let bands = QuotaGraphTimeAxis.dayBands(startDate: start, resetDate: reset, calendar: calendar)
+
+        XCTAssertEqual(bands.count, 8)
+        XCTAssertEqual(bands.first?.startDate, date(year: 2026, month: 7, day: 10, hour: 0, minute: 0, calendar: calendar))
+        XCTAssertEqual(bands.last?.endDate, date(year: 2026, month: 7, day: 18, hour: 0, minute: 0, calendar: calendar))
+        XCTAssertEqual(bands.first?.isLight, true)
+        XCTAssertTrue(
+            zip(bands, bands.dropFirst()).allSatisfy {
+                $0.endDate == $1.startDate && $0.isLight != $1.isLight
+            }
+        )
+    }
+
+    func testGraphDayBandsAlwaysBeginWithLightBand() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+
+        for day in [1, 2] {
+            let start = date(year: 2026, month: 5, day: day, hour: 15, minute: 30, calendar: calendar)
+            let reset = start.addingTimeInterval(7 * 24 * 60 * 60)
+
+            let bands = QuotaGraphTimeAxis.dayBands(startDate: start, resetDate: reset, calendar: calendar)
+
+            XCTAssertEqual(bands.first?.isLight, true)
+        }
+    }
+
+    func testGraphIntensityBandsAdaptWhenRunCrossesDayBoundary() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let start = date(year: 2026, month: 5, day: 1, hour: 15, minute: 30, calendar: calendar)
+        let reset = start.addingTimeInterval(7 * 24 * 60 * 60)
+        let dayBands = QuotaGraphTimeAxis.dayBands(startDate: start, resetDate: reset, calendar: calendar)
+        let run = QuotaForecastRun(
+            startDate: date(year: 2026, month: 5, day: 1, hour: 23, minute: 0, calendar: calendar),
+            endDate: date(year: 2026, month: 5, day: 2, hour: 1, minute: 0, calendar: calendar),
+            startUsedPercent: 10,
+            endUsedPercent: 12
+        )
+
+        let intensityBands = QuotaGraphTimeAxis.intensityBands(
+            runs: [run],
+            dayBands: dayBands,
+            startDate: start,
+            resetDate: reset
+        )
+
+        XCTAssertEqual(
+            intensityBands,
+            [
+                QuotaGraphIntensityBand(
+                    index: 0,
+                    startDate: run.startDate,
+                    endDate: date(year: 2026, month: 5, day: 2, hour: 0, minute: 0, calendar: calendar),
+                    isLight: true
+                ),
+                QuotaGraphIntensityBand(
+                    index: 1,
+                    startDate: date(year: 2026, month: 5, day: 2, hour: 0, minute: 0, calendar: calendar),
+                    endDate: run.endDate,
+                    isLight: false
+                )
+            ]
+        )
+    }
+
+    func testGraphIntensityBandsStayWithinRealWindow() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let start = date(year: 2026, month: 5, day: 1, hour: 15, minute: 30, calendar: calendar)
+        let reset = start.addingTimeInterval(7 * 24 * 60 * 60)
+        let dayBands = QuotaGraphTimeAxis.dayBands(startDate: start, resetDate: reset, calendar: calendar)
+        let run = QuotaForecastRun(
+            startDate: start.addingTimeInterval(-60 * 60),
+            endDate: reset.addingTimeInterval(60 * 60),
+            startUsedPercent: 10,
+            endUsedPercent: 20
+        )
+
+        let intensityBands = QuotaGraphTimeAxis.intensityBands(
+            runs: [run],
+            dayBands: dayBands,
+            startDate: start,
+            resetDate: reset
+        )
+
+        XCTAssertEqual(intensityBands.first?.startDate, start)
+        XCTAssertEqual(intensityBands.last?.endDate, reset)
+        XCTAssertTrue(intensityBands.allSatisfy { $0.startDate >= start && $0.endDate <= reset })
     }
 
     func testGraphDayBandsRemain24HoursAcrossDaylightSavingChange() throws {
@@ -168,7 +266,7 @@ final class CloudQuotaSampleSyncPolicyTests: XCTestCase {
         XCTAssertEqual(calendar.component(.hour, from: bandCrossingDST.endDate), 1)
         XCTAssertTrue(
             zip(bands, bands.dropFirst()).allSatisfy {
-                $0.isHighlighted != $1.isHighlighted
+                $0.isLight != $1.isLight
             }
         )
     }
@@ -184,7 +282,7 @@ final class CloudQuotaSampleSyncPolicyTests: XCTestCase {
         XCTAssertTrue(bands.allSatisfy { $0.endDate.timeIntervalSince($0.startDate) == 24 * 60 * 60 })
         XCTAssertTrue(
             zip(bands, bands.dropFirst()).allSatisfy {
-                $0.endDate == $1.startDate && $0.isHighlighted != $1.isHighlighted
+                $0.endDate == $1.startDate && $0.isLight != $1.isLight
             }
         )
     }
