@@ -478,8 +478,11 @@ private struct QuotaGraphView: View {
     var body: some View {
         if let resetDate = projection.weeklyResetDate {
             let startDate = QuotaHistoryWindow.startDate(resetDate: resetDate)
+            let dayBands = QuotaGraphTimeAxis.dayBands(startDate: startDate, resetDate: resetDate)
+            let plotStartDate = dayBands.first?.startDate ?? startDate
+            let plotEndDate = dayBands.last?.endDate ?? resetDate
             Chart {
-                ForEach(QuotaGraphTimeAxis.dayBands(startDate: startDate, resetDate: resetDate)) { band in
+                ForEach(dayBands) { band in
                     RectangleMark(
                         xStart: .value("Start", band.startDate),
                         xEnd: .value("End", band.endDate),
@@ -499,11 +502,35 @@ private struct QuotaGraphView: View {
                     .foregroundStyle(Color.orange.opacity(0.13))
                 }
 
-                ForEach(QuotaGraphTimeAxis.dayBoundaries(startDate: startDate, resetDate: resetDate)) { boundary in
+                if plotStartDate < startDate {
+                    RectangleMark(
+                        xStart: .value("Before Window", plotStartDate),
+                        xEnd: .value("Window Start", startDate),
+                        yStart: .value("Low", 0),
+                        yEnd: .value("High", graphCeiling)
+                    )
+                    .foregroundStyle(Color.black.opacity(0.28))
+                }
+
+                if resetDate < plotEndDate {
+                    RectangleMark(
+                        xStart: .value("Window End", resetDate),
+                        xEnd: .value("After Window", plotEndDate),
+                        yStart: .value("Low", 0),
+                        yEnd: .value("High", graphCeiling)
+                    )
+                    .foregroundStyle(Color.black.opacity(0.28))
+                }
+
+                ForEach(QuotaGraphTimeAxis.dayBoundaries(startDate: plotStartDate, resetDate: plotEndDate)) { boundary in
                     RuleMark(x: .value("Day", boundary.date))
                         .foregroundStyle(.secondary.opacity(0.16))
                         .lineStyle(StrokeStyle(lineWidth: 0.5))
                 }
+
+                RuleMark(x: .value("Window Start", startDate))
+                    .foregroundStyle(.secondary.opacity(0.5))
+                    .lineStyle(StrokeStyle(lineWidth: 1, lineCap: .butt))
 
                 ForEach(actualPoints) { point in
                     LineMark(
@@ -547,7 +574,7 @@ private struct QuotaGraphView: View {
                     .foregroundStyle(.red.opacity(0.85))
                     .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .butt))
             }
-            .chartXScale(domain: startDate ... resetDate)
+            .chartXScale(domain: plotStartDate ... plotEndDate)
             .chartYScale(domain: 0 ... graphCeiling)
             .chartXAxis(.hidden)
             .chartYAxis {
@@ -571,8 +598,8 @@ private struct QuotaGraphView: View {
                     if let cycleForecast = projection.cycleRunForecast {
                         CycleForecastCorridorOverlay(
                             forecast: cycleForecast,
-                            startDate: startDate,
-                            resetDate: resetDate,
+                            plotStartDate: plotStartDate,
+                            plotEndDate: plotEndDate,
                             ceiling: graphCeiling
                         )
                         .allowsHitTesting(false)
@@ -700,18 +727,18 @@ enum QuotaGraphTimeAxis {
         }
 
         var bands: [QuotaGraphDayBand] = []
-        var bandStart = firstCycleBoundary(onOrAfter: startDate, calendar: calendar)
+        var bandStart = cycleBoundary(onOrBefore: startDate, calendar: calendar)
+        let firstDayOrdinal = calendar.ordinality(of: .day, in: .era, for: bandStart) ?? 0
         var index = 0
 
-        while bandStart.addingTimeInterval(cycleDuration) <= resetDate {
+        while bandStart < resetDate {
             let bandEnd = bandStart.addingTimeInterval(cycleDuration)
-            let dayOrdinal = calendar.ordinality(of: .day, in: .era, for: bandStart) ?? index
             bands.append(
                 QuotaGraphDayBand(
                     index: index,
                     startDate: bandStart,
                     endDate: bandEnd,
-                    isHighlighted: dayOrdinal.isMultiple(of: 2)
+                    isHighlighted: (firstDayOrdinal + index).isMultiple(of: 2)
                 )
             )
 
@@ -732,10 +759,8 @@ enum QuotaGraphTimeAxis {
         }
 
         var boundaries: [QuotaGraphDayBoundary] = []
-        var boundary = firstCycleBoundary(onOrAfter: startDate, calendar: calendar)
-        if boundary <= startDate.addingTimeInterval(0.5) {
-            boundary = boundary.addingTimeInterval(cycleDuration)
-        }
+        var boundary = cycleBoundary(onOrBefore: startDate, calendar: calendar)
+            .addingTimeInterval(cycleDuration)
         var index = 0
 
         while boundary < resetDate {
@@ -747,12 +772,8 @@ enum QuotaGraphTimeAxis {
         return boundaries
     }
 
-    private static func firstCycleBoundary(onOrAfter date: Date, calendar: Calendar) -> Date {
-        let dayStart = calendar.startOfDay(for: date)
-        if abs(dayStart.timeIntervalSince(date)) < 0.5 {
-            return date
-        }
-        return calendar.date(byAdding: .day, value: 1, to: dayStart) ?? date
+    private static func cycleBoundary(onOrBefore date: Date, calendar: Calendar) -> Date {
+        calendar.startOfDay(for: date)
     }
 }
 
@@ -798,8 +819,8 @@ private struct GraphPoint: Identifiable {
 
 private struct CycleForecastCorridorOverlay: View {
     let forecast: QuotaCycleRunForecast
-    let startDate: Date
-    let resetDate: Date
+    let plotStartDate: Date
+    let plotEndDate: Date
     let ceiling: Double
 
     var body: some View {
@@ -807,7 +828,7 @@ private struct CycleForecastCorridorOverlay: View {
             Canvas { context, size in
                 guard size.width > 0,
                       size.height > 0,
-                      resetDate > startDate else {
+                      plotEndDate > plotStartDate else {
                     return
                 }
 
@@ -1056,8 +1077,8 @@ private struct CycleForecastCorridorOverlay: View {
     }
 
     private func x(date: Date, in size: CGSize) -> Double {
-        let duration = resetDate.timeIntervalSince(startDate)
-        let fraction = date.timeIntervalSince(startDate) / duration
+        let duration = plotEndDate.timeIntervalSince(plotStartDate)
+        let fraction = date.timeIntervalSince(plotStartDate) / duration
         return min(1, max(0, fraction)) * size.width
     }
 

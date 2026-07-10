@@ -51,7 +51,7 @@ Click the cup icon in the menu bar.
 
 When either awake mode is active, closing the lid should not put the Mac to sleep.
 
-The graph x-axis always shows the full seven days before the renewal deadline. Alternating background bands follow local calendar day boundaries. Yellow is the current forecast, red is the over-limit portion, and the red vertical bar is the renew deadline.
+The graph shows complete fixed 24-hour bands anchored to the first local midnight before the seven-day quota window. The portions before that window and after the renewal deadline are shaded dark grey. Yellow is the current forecast, red is the over-limit portion, and the red vertical bar is the renew deadline.
 
 The footer shows whether quota history is local-only, syncing, synced through iCloud, paused by CloudKit rate limiting, or temporarily unavailable.
 
