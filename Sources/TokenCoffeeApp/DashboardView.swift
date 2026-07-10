@@ -688,6 +688,8 @@ private struct QuotaGraphView: View {
 }
 
 enum QuotaGraphTimeAxis {
+    private static let cycleDuration: TimeInterval = 24 * 60 * 60
+
     static func dayBands(
         startDate: Date,
         resetDate: Date,
@@ -698,11 +700,11 @@ enum QuotaGraphTimeAxis {
         }
 
         var bands: [QuotaGraphDayBand] = []
-        var bandStart = startDate
+        var bandStart = firstCycleBoundary(onOrAfter: startDate, calendar: calendar)
         var index = 0
 
-        while bandStart < resetDate {
-            let bandEnd = min(nextDayBoundary(after: bandStart, calendar: calendar), resetDate)
+        while bandStart.addingTimeInterval(cycleDuration) <= resetDate {
+            let bandEnd = bandStart.addingTimeInterval(cycleDuration)
             let dayOrdinal = calendar.ordinality(of: .day, in: .era, for: bandStart) ?? index
             bands.append(
                 QuotaGraphDayBand(
@@ -713,9 +715,6 @@ enum QuotaGraphTimeAxis {
                 )
             )
 
-            guard bandEnd < resetDate else {
-                break
-            }
             bandStart = bandEnd
             index += 1
         }
@@ -733,23 +732,26 @@ enum QuotaGraphTimeAxis {
         }
 
         var boundaries: [QuotaGraphDayBoundary] = []
-        var boundary = nextDayBoundary(after: startDate, calendar: calendar)
+        var boundary = firstCycleBoundary(onOrAfter: startDate, calendar: calendar)
+        if boundary <= startDate.addingTimeInterval(0.5) {
+            boundary = boundary.addingTimeInterval(cycleDuration)
+        }
         var index = 0
 
         while boundary < resetDate {
             boundaries.append(QuotaGraphDayBoundary(index: index, date: boundary))
-            guard let nextBoundary = calendar.date(byAdding: .day, value: 1, to: boundary) else {
-                break
-            }
-            boundary = nextBoundary
+            boundary = boundary.addingTimeInterval(cycleDuration)
             index += 1
         }
 
         return boundaries
     }
 
-    private static func nextDayBoundary(after date: Date, calendar: Calendar) -> Date {
+    private static func firstCycleBoundary(onOrAfter date: Date, calendar: Calendar) -> Date {
         let dayStart = calendar.startOfDay(for: date)
+        if abs(dayStart.timeIntervalSince(date)) < 0.5 {
+            return date
+        }
         return calendar.date(byAdding: .day, value: 1, to: dayStart) ?? date
     }
 }

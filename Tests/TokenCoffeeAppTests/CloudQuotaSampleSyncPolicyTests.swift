@@ -106,7 +106,7 @@ final class CloudQuotaSampleSyncPolicyTests: XCTestCase {
         XCTAssertEqual(start, reset.addingTimeInterval(-7 * 24 * 60 * 60))
     }
 
-    func testGraphDayBoundariesUseCalendarMidnights() throws {
+    func testGraphDayBoundariesUseFixed24HourCycles() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
         let start = date(year: 2026, month: 5, day: 1, hour: 15, minute: 30, calendar: calendar)
@@ -121,14 +121,13 @@ final class CloudQuotaSampleSyncPolicyTests: XCTestCase {
         XCTAssertEqual(boundaries.first?.date, date(year: 2026, month: 5, day: 2, hour: 0, minute: 0, calendar: calendar))
         XCTAssertEqual(boundaries.count, 7)
         XCTAssertTrue(
-            boundaries.allSatisfy {
-                calendar.component(.hour, from: $0.date) == 0
-                    && calendar.component(.minute, from: $0.date) == 0
+            zip(boundaries, boundaries.dropFirst()).allSatisfy {
+                $1.date.timeIntervalSince($0.date) == 24 * 60 * 60
             }
         )
     }
 
-    func testGraphDayBandsUseCalendarDayBorders() throws {
+    func testGraphDayBandsUseComplete24HourCycles() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
         let start = date(year: 2026, month: 5, day: 1, hour: 15, minute: 30, calendar: calendar)
@@ -136,9 +135,26 @@ final class CloudQuotaSampleSyncPolicyTests: XCTestCase {
 
         let bands = QuotaGraphTimeAxis.dayBands(startDate: start, resetDate: reset, calendar: calendar)
 
-        XCTAssertEqual(bands.first?.startDate, start)
-        XCTAssertEqual(bands.first?.endDate, date(year: 2026, month: 5, day: 2, hour: 0, minute: 0, calendar: calendar))
-        XCTAssertEqual(bands.last?.endDate, reset)
+        XCTAssertEqual(bands.count, 6)
+        XCTAssertEqual(bands.first?.startDate, date(year: 2026, month: 5, day: 2, hour: 0, minute: 0, calendar: calendar))
+        XCTAssertEqual(bands.last?.endDate, date(year: 2026, month: 5, day: 8, hour: 0, minute: 0, calendar: calendar))
+        XCTAssertTrue(bands.allSatisfy { $0.endDate.timeIntervalSince($0.startDate) == 24 * 60 * 60 })
+        XCTAssertNotEqual(bands.first?.startDate, start)
+        XCTAssertNotEqual(bands.last?.endDate, reset)
+    }
+
+    func testGraphDayBandsRemain24HoursAcrossDaylightSavingChange() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Europe/Stockholm"))
+        let start = date(year: 2026, month: 3, day: 28, hour: 12, minute: 0, calendar: calendar)
+        let reset = start.addingTimeInterval(7 * 24 * 60 * 60)
+
+        let bands = QuotaGraphTimeAxis.dayBands(startDate: start, resetDate: reset, calendar: calendar)
+
+        XCTAssertFalse(bands.isEmpty)
+        XCTAssertTrue(bands.allSatisfy { $0.endDate.timeIntervalSince($0.startDate) == 24 * 60 * 60 })
+        XCTAssertEqual(calendar.component(.hour, from: try XCTUnwrap(bands.first?.startDate)), 0)
+        XCTAssertEqual(calendar.component(.hour, from: try XCTUnwrap(bands.first?.endDate)), 1)
     }
 
     func testRateLimitRetryDateUsesCloudKitRetryAfter() {
