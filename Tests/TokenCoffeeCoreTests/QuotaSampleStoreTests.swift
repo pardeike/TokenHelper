@@ -73,6 +73,111 @@ final class QuotaSampleStoreTests: XCTestCase {
         try? FileManager.default.removeItem(at: directory)
     }
 
+    func testContinuityPolicyDefersSingleEarlyResetDropout() {
+        let trusted = makeSnapshot(usedPercent: 54, resetAt: 10_000)
+        let dropout = makeSnapshot(usedPercent: 0, resetAt: 20_000)
+        var policy = QuotaSnapshotContinuityPolicy(trustedSnapshot: trusted)
+
+        XCTAssertEqual(
+            policy.evaluate(dropout, capturedAt: Date(timeIntervalSince1970: 1_000)),
+            .pending
+        )
+        XCTAssertEqual(
+            policy.evaluate(trusted, capturedAt: Date(timeIntervalSince1970: 1_060)),
+            .accepted([QuotaSnapshotObservation(
+                snapshot: trusted,
+                capturedAt: Date(timeIntervalSince1970: 1_060)
+            )])
+        )
+    }
+
+    func testContinuityPolicyAcceptsConfirmedEarlyOpenAIReset() {
+        let trusted = makeSnapshot(usedPercent: 54, resetAt: 10_000)
+        let reset = makeSnapshot(usedPercent: 0, resetAt: 20_000)
+        var policy = QuotaSnapshotContinuityPolicy(trustedSnapshot: trusted)
+
+        XCTAssertEqual(policy.evaluate(reset, capturedAt: Date(timeIntervalSince1970: 1_000)), .pending)
+        XCTAssertEqual(policy.evaluate(reset, capturedAt: Date(timeIntervalSince1970: 1_060)), .pending)
+        XCTAssertEqual(
+            policy.evaluate(reset, capturedAt: Date(timeIntervalSince1970: 1_120)),
+            .accepted([
+                QuotaSnapshotObservation(snapshot: reset, capturedAt: Date(timeIntervalSince1970: 1_000)),
+                QuotaSnapshotObservation(snapshot: reset, capturedAt: Date(timeIntervalSince1970: 1_060)),
+                QuotaSnapshotObservation(snapshot: reset, capturedAt: Date(timeIntervalSince1970: 1_120)),
+            ])
+        )
+        XCTAssertEqual(policy.trustedSnapshot, reset)
+    }
+
+    func testContinuityPolicyDoesNotConfirmMovingFallbackWindow() {
+        let trusted = makeSnapshot(usedPercent: 54, resetAt: 10_000)
+        var policy = QuotaSnapshotContinuityPolicy(trustedSnapshot: trusted)
+
+        for index in 0..<5 {
+            let fallback = makeSnapshot(
+                usedPercent: 0,
+                resetAt: 20_000 + TimeInterval(index * 60)
+            )
+            XCTAssertEqual(
+                policy.evaluate(
+                    fallback,
+                    capturedAt: Date(timeIntervalSince1970: 1_000 + TimeInterval(index * 60))
+                ),
+                .pending
+            )
+        }
+        XCTAssertEqual(policy.trustedSnapshot, trusted)
+    }
+
+    func testContinuityPolicyAcceptsScheduledResetImmediately() {
+        let trusted = makeSnapshot(usedPercent: 54, resetAt: 10_000)
+        let reset = makeSnapshot(usedPercent: 0, resetAt: 20_000)
+        let capturedAt = Date(timeIntervalSince1970: 10_001)
+        var policy = QuotaSnapshotContinuityPolicy(trustedSnapshot: trusted)
+
+        XCTAssertEqual(
+            policy.evaluate(reset, capturedAt: capturedAt),
+            .accepted([QuotaSnapshotObservation(snapshot: reset, capturedAt: capturedAt)])
+        )
+    }
+
+    func testContinuityBootstrapUsesDominantRecentResetWindow() {
+        let oldReset = Date(timeIntervalSince1970: 20_000)
+        let dropoutReset = Date(timeIntervalSince1970: 30_000)
+        let samples = [
+            makeSample(capturedAt: 1_000, resetAt: oldReset.timeIntervalSince1970, usedPercent: 53),
+            makeSample(capturedAt: 1_060, resetAt: oldReset.timeIntervalSince1970, usedPercent: 53),
+            makeSample(capturedAt: 1_120, resetAt: oldReset.timeIntervalSince1970, usedPercent: 54),
+            makeSample(capturedAt: 1_180, resetAt: dropoutReset.timeIntervalSince1970, usedPercent: 0),
+        ]
+
+        let snapshot = QuotaSnapshotContinuityPolicy.bootstrapSnapshot(from: samples)
+
+        XCTAssertEqual(snapshot?.secondary?.usedPercent, 54)
+        XCTAssertEqual(snapshot?.secondary?.resetDate, oldReset)
+    }
+
+    func testContinuityRepairRemovesDropoutAndKeepsConfirmedEarlyReset() {
+        let oldReset: TimeInterval = 20_000
+        let newReset: TimeInterval = 30_000
+        let samples = [
+            makeSample(capturedAt: 1_000, resetAt: oldReset, usedPercent: 53),
+            makeSample(capturedAt: 1_060, resetAt: oldReset, usedPercent: 54),
+            makeSample(capturedAt: 1_120, resetAt: newReset, usedPercent: 0),
+            makeSample(capturedAt: 1_180, resetAt: oldReset, usedPercent: 54),
+            makeSample(capturedAt: 1_240, resetAt: newReset, usedPercent: 0),
+            makeSample(capturedAt: 1_300, resetAt: newReset, usedPercent: 0),
+            makeSample(capturedAt: 1_360, resetAt: newReset, usedPercent: 1),
+        ]
+
+        let repaired = QuotaSnapshotContinuityPolicy.repairedSamples(samples)
+
+        XCTAssertEqual(
+            repaired.map(\.capturedAt),
+            [1_000, 1_060, 1_180, 1_240, 1_300, 1_360].map(Date.init(timeIntervalSince1970:))
+        )
+    }
+
     private func makeSample(
         capturedAt: TimeInterval,
         limitId: String = "codex",
@@ -89,6 +194,26 @@ final class QuotaSampleStoreTests: XCTestCase {
             fiveHourUsedPercent: 4,
             fiveHourWindowMinutes: 300,
             fiveHourResetsAt: Date(timeIntervalSince1970: 200),
+            planType: "pro",
+            rateLimitReachedType: nil
+        )
+    }
+
+    private func makeSnapshot(usedPercent: Double, resetAt: TimeInterval) -> RateLimitSnapshot {
+        RateLimitSnapshot(
+            limitId: "codex",
+            limitName: nil,
+            primary: RateLimitWindow(
+                usedPercent: min(usedPercent, 20),
+                windowDurationMins: 300,
+                resetsAt: Int(resetAt - 1_000)
+            ),
+            secondary: RateLimitWindow(
+                usedPercent: usedPercent,
+                windowDurationMins: 10_080,
+                resetsAt: Int(resetAt)
+            ),
+            credits: nil,
             planType: "pro",
             rateLimitReachedType: nil
         )

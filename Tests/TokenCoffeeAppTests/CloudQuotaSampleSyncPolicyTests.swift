@@ -25,10 +25,28 @@ final class CloudQuotaSampleSyncPolicyTests: XCTestCase {
         let samples = CloudQuotaSampleSyncPolicy.samplesToUpload(
             localSamples: [old, remote, upload],
             remoteRecordNames: [remote.syncRecordName],
-            uploadWatermark: watermark
+            uploadWatermark: watermark,
+            windowStartDate: Date(timeIntervalSince1970: 200)
         )
 
         XCTAssertEqual(samples, [upload])
+    }
+
+    func testSamplesToUploadRecoversMissingCurrentWindowRecordsBelowWatermark() {
+        let watermark = Date(timeIntervalSince1970: 400)
+        let outsideWindow = sample(capturedAt: 100)
+        let olderMissing = sample(capturedAt: 250)
+        let newestMissing = sample(capturedAt: 350)
+
+        let samples = CloudQuotaSampleSyncPolicy.samplesToUpload(
+            localSamples: [outsideWindow, olderMissing, newestMissing],
+            remoteRecordNames: [],
+            uploadWatermark: watermark,
+            windowStartDate: Date(timeIntervalSince1970: 200),
+            limit: 1
+        )
+
+        XCTAssertEqual(samples, [newestMissing])
     }
 
     func testCleanupUsesCurrentTimeAxisLeftEdgeOnly() {
@@ -63,15 +81,17 @@ final class CloudQuotaSampleSyncPolicyTests: XCTestCase {
         XCTAssertEqual(recordNames, [oldest.syncRecordName, middle.syncRecordName])
     }
 
-    func testCleanupContextUsesGraphWindowStart() throws {
+    func testCleanupContextKeepsAtLeastSevenRollingDays() throws {
         let reset = Date(timeIntervalSince1970: 10_000)
-        let expectedWindowStart = QuotaHistoryWindow.startDate(resetDate: reset)
+        let graphWindowStart = QuotaHistoryWindow.startDate(resetDate: reset)
+        let now = graphWindowStart.addingTimeInterval(3 * 24 * 60 * 60)
+        let expectedWindowStart = now.addingTimeInterval(-7 * 24 * 60 * 60)
         let snapshot = snapshot(reset: reset, windowMinutes: 14 * 24 * 60)
 
         let context = try XCTUnwrap(
             CloudQuotaSampleCleanupContext(
                 snapshot: snapshot,
-                now: expectedWindowStart.addingTimeInterval(60)
+                now: now
             )
         )
 

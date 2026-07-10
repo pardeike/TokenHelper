@@ -87,6 +87,228 @@ public struct QuotaSample: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+public struct QuotaSnapshotObservation: Equatable, Sendable {
+    public let snapshot: RateLimitSnapshot
+    public let capturedAt: Date
+
+    public init(snapshot: RateLimitSnapshot, capturedAt: Date) {
+        self.snapshot = snapshot
+        self.capturedAt = capturedAt
+    }
+}
+
+public enum QuotaSnapshotContinuityDecision: Equatable, Sendable {
+    case accepted([QuotaSnapshotObservation])
+    case pending
+}
+
+public struct QuotaSnapshotContinuityPolicy: Sendable {
+    public static let requiredConfirmationCount = 3
+    public static let requiredConfirmationDuration: TimeInterval = 90
+
+    public private(set) var trustedSnapshot: RateLimitSnapshot?
+    private var candidateObservations: [QuotaSnapshotObservation] = []
+
+    public init(trustedSnapshot: RateLimitSnapshot? = nil) {
+        self.trustedSnapshot = trustedSnapshot
+    }
+
+    public mutating func reset(trustedSnapshot: RateLimitSnapshot?) {
+        self.trustedSnapshot = trustedSnapshot
+        candidateObservations = []
+    }
+
+    public func canPublishImmediately(_ snapshot: RateLimitSnapshot, capturedAt: Date) -> Bool {
+        guard let trustedSnapshot else {
+            return true
+        }
+        return Self.requiresConfirmation(
+            snapshot,
+            after: trustedSnapshot,
+            capturedAt: capturedAt
+        ) == false
+    }
+
+    public mutating func evaluate(
+        _ snapshot: RateLimitSnapshot,
+        capturedAt: Date
+    ) -> QuotaSnapshotContinuityDecision {
+        let observation = QuotaSnapshotObservation(snapshot: snapshot, capturedAt: capturedAt)
+        guard let trustedSnapshot else {
+            self.trustedSnapshot = snapshot
+            candidateObservations = []
+            return .accepted([observation])
+        }
+
+        guard Self.requiresConfirmation(snapshot, after: trustedSnapshot, capturedAt: capturedAt) else {
+            self.trustedSnapshot = snapshot
+            candidateObservations = []
+            return .accepted([observation])
+        }
+
+        if let candidate = candidateObservations.last,
+           Self.sameCandidateWindow(candidate.snapshot, snapshot) {
+            candidateObservations.append(observation)
+        } else {
+            candidateObservations = [observation]
+        }
+
+        guard let firstCandidate = candidateObservations.first,
+              candidateObservations.count >= Self.requiredConfirmationCount,
+              capturedAt.timeIntervalSince(firstCandidate.capturedAt) >= Self.requiredConfirmationDuration else {
+            return .pending
+        }
+
+        let accepted = candidateObservations
+        self.trustedSnapshot = snapshot
+        candidateObservations = []
+        return .accepted(accepted)
+    }
+
+    public static func bootstrapSnapshot(from samples: [QuotaSample]) -> RateLimitSnapshot? {
+        guard let latestDate = samples.map(\.capturedAt).max() else {
+            return nil
+        }
+
+        let cutoff = latestDate.addingTimeInterval(-24 * 60 * 60)
+        let recentSamples = samples.filter {
+            $0.capturedAt >= cutoff && $0.weeklyResetsAt != nil
+        }
+        let candidates = recentSamples.isEmpty ? samples : recentSamples
+        let grouped = Dictionary(grouping: candidates.compactMap { sample -> (String, QuotaSample)? in
+            guard let resetDate = sample.weeklyResetsAt else {
+                return nil
+            }
+            let resetMinute = Int64((resetDate.timeIntervalSince1970 / 60).rounded())
+            return ("\(sample.limitId)|\(resetMinute)", sample)
+        }, by: \.0)
+
+        let dominantGroup = grouped.values.max { lhs, rhs in
+            if lhs.count == rhs.count {
+                let lhsDate = lhs.map(\.1.capturedAt).max() ?? .distantPast
+                let rhsDate = rhs.map(\.1.capturedAt).max() ?? .distantPast
+                return lhsDate < rhsDate
+            }
+            return lhs.count < rhs.count
+        }
+        guard let sample = dominantGroup?.map(\.1).max(by: { $0.capturedAt < $1.capturedAt }) else {
+            return nil
+        }
+        return snapshot(from: sample)
+    }
+
+    public static func repairedSamples(_ samples: [QuotaSample]) -> [QuotaSample] {
+        let sortedSamples = samples.sorted { lhs, rhs in
+            if lhs.capturedAt == rhs.capturedAt {
+                return lhs.limitId < rhs.limitId
+            }
+            return lhs.capturedAt < rhs.capturedAt
+        }
+        let samplesByObservation = Dictionary(
+            sortedSamples.map { (observationKey(sample: $0), $0) },
+            uniquingKeysWith: { _, replacement in replacement }
+        )
+        var policiesByLimitId: [String: QuotaSnapshotContinuityPolicy] = [:]
+        var repaired: [QuotaSample] = []
+
+        for sample in sortedSamples {
+            var policy = policiesByLimitId[sample.limitId] ?? QuotaSnapshotContinuityPolicy()
+            let decision = policy.evaluate(snapshot(from: sample), capturedAt: sample.capturedAt)
+            policiesByLimitId[sample.limitId] = policy
+            guard case let .accepted(observations) = decision else {
+                continue
+            }
+            repaired.append(contentsOf: observations.compactMap {
+                samplesByObservation[observationKey(observation: $0)]
+            })
+        }
+
+        return QuotaSampleStore.mergedSamples(
+            repaired,
+            policy: .countOnly(max(1, samples.count))
+        )
+    }
+
+    private static func requiresConfirmation(
+        _ snapshot: RateLimitSnapshot,
+        after trustedSnapshot: RateLimitSnapshot,
+        capturedAt: Date
+    ) -> Bool {
+        guard snapshot.limitId == trustedSnapshot.limitId,
+              let weekly = snapshot.secondary,
+              let trustedWeekly = trustedSnapshot.secondary else {
+            return false
+        }
+
+        let usageDecreased = weekly.usedPercent + usageTolerance < trustedWeekly.usedPercent
+        guard usageDecreased else {
+            return false
+        }
+
+        guard let resetDate = weekly.resetDate,
+              let trustedResetDate = trustedWeekly.resetDate else {
+            return true
+        }
+
+        let oldWindowHasReset = capturedAt >= trustedResetDate.addingTimeInterval(-scheduledResetGrace)
+            && resetDate > trustedResetDate.addingTimeInterval(resetTolerance)
+        return oldWindowHasReset == false
+    }
+
+    private static func sameCandidateWindow(
+        _ lhs: RateLimitSnapshot,
+        _ rhs: RateLimitSnapshot
+    ) -> Bool {
+        guard lhs.limitId == rhs.limitId,
+              let lhsWeekly = lhs.secondary,
+              let rhsWeekly = rhs.secondary else {
+            return false
+        }
+        switch (lhsWeekly.resetDate, rhsWeekly.resetDate) {
+        case let (lhsReset?, rhsReset?):
+            return abs(lhsReset.timeIntervalSince(rhsReset)) <= resetTolerance
+        case (nil, nil):
+            return true
+        case (_?, nil), (nil, _?):
+            return false
+        }
+    }
+
+    private static func snapshot(from sample: QuotaSample) -> RateLimitSnapshot {
+        RateLimitSnapshot(
+            limitId: sample.limitId,
+            limitName: sample.limitName,
+            primary: sample.fiveHourUsedPercent.map {
+                RateLimitWindow(
+                    usedPercent: $0,
+                    windowDurationMins: sample.fiveHourWindowMinutes,
+                    resetsAt: sample.fiveHourResetsAt.map { Int($0.timeIntervalSince1970.rounded()) }
+                )
+            },
+            secondary: RateLimitWindow(
+                usedPercent: sample.weeklyUsedPercent,
+                windowDurationMins: sample.weeklyWindowMinutes,
+                resetsAt: sample.weeklyResetsAt.map { Int($0.timeIntervalSince1970.rounded()) }
+            ),
+            credits: nil,
+            planType: sample.planType,
+            rateLimitReachedType: sample.rateLimitReachedType
+        )
+    }
+
+    private static func observationKey(sample: QuotaSample) -> String {
+        "\(sample.limitId)|\(Int64(sample.capturedAt.timeIntervalSince1970.rounded()))|\(Int64((sample.weeklyResetsAt?.timeIntervalSince1970 ?? 0).rounded()))"
+    }
+
+    private static func observationKey(observation: QuotaSnapshotObservation) -> String {
+        "\(observation.snapshot.limitId ?? "codex")|\(Int64(observation.capturedAt.timeIntervalSince1970.rounded()))|\(Int64((observation.snapshot.secondary?.resetDate?.timeIntervalSince1970 ?? 0).rounded()))"
+    }
+
+    private static let usageTolerance = 0.001
+    private static let resetTolerance: TimeInterval = 5
+    private static let scheduledResetGrace: TimeInterval = 60
+}
+
 public struct QuotaSampleRetentionPolicy: Equatable, Sendable {
     public static let standard = QuotaSampleRetentionPolicy(
         maximumSampleAge: 14 * 24 * 60 * 60,

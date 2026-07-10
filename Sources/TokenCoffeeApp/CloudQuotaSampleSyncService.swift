@@ -28,6 +28,7 @@ actor CloudQuotaSampleSyncService {
         static let caughtUpPageLimit = 1
         static let catchUpPageLimit = 2
         static let cleanupBatchSize = 100
+        static let recoveryUploadBatchSize = 200
         static let cleanupInterval: TimeInterval = 15 * 60
         static let legacyDefaultZonePageLimit = 2
     }
@@ -113,7 +114,9 @@ actor CloudQuotaSampleSyncService {
             let samplesToUpload = CloudQuotaSampleSyncPolicy.samplesToUpload(
                 localSamples: normalizedLocalSamples,
                 remoteRecordNames: Set(state.remoteSamplesByRecordName.keys),
-                uploadWatermark: state.lastUploadedSampleCapturedAt
+                uploadWatermark: state.lastUploadedSampleCapturedAt,
+                windowStartDate: cleanupContext?.windowStartDate,
+                limit: Defaults.recoveryUploadBatchSize
             )
             cloudSyncLogger.info("Cloud quota sync upload batch prepared; samplesToUpload=\(samplesToUpload.count, privacy: .public)")
             try await applyChanges(saving: samplesToUpload, deleting: [], to: database)
@@ -564,8 +567,10 @@ struct CloudQuotaSampleCleanupContext: Equatable, Sendable {
             return nil
         }
 
-        windowStartDate = QuotaHistoryWindow.startDate(resetDate: resetDate)
-        guard windowStartDate <= now else {
+        let snapshotWindowStart = QuotaHistoryWindow.startDate(resetDate: resetDate)
+        let rollingSafetyStart = now.addingTimeInterval(-7 * 24 * 60 * 60)
+        windowStartDate = min(snapshotWindowStart, rollingSafetyStart)
+        guard snapshotWindowStart <= now else {
             return nil
         }
     }
@@ -673,14 +678,25 @@ enum CloudQuotaSampleSyncPolicy {
     static func samplesToUpload(
         localSamples: [QuotaSample],
         remoteRecordNames: Set<String>,
-        uploadWatermark: Date?
+        uploadWatermark: Date?,
+        windowStartDate: Date? = nil,
+        limit: Int = .max
     ) -> [QuotaSample] {
         guard let uploadWatermark else {
             return []
         }
-        return localSamples
-            .filter { $0.capturedAt > uploadWatermark }
+        let missingSamples = localSamples
+            .filter { sample in
+                windowStartDate.map { sample.capturedAt >= $0 } ?? true
+            }
             .filter { remoteRecordNames.contains($0.syncRecordName) == false }
+        let newSamples = missingSamples
+            .filter { $0.capturedAt > uploadWatermark }
+            .sorted { $0.capturedAt < $1.capturedAt }
+        let recoverySamples = missingSamples
+            .filter { $0.capturedAt <= uploadWatermark }
+            .sorted { $0.capturedAt > $1.capturedAt }
+        return Array((newSamples + recoverySamples).prefix(max(0, limit)))
     }
 
     static func markUploaded(_ samples: [QuotaSample], in state: inout CloudQuotaSampleSyncState) {

@@ -32,6 +32,7 @@ final class AppModel: ObservableObject {
     private let sampleStore: QuotaSampleStore
     private let sampleSyncService: CloudQuotaSampleSyncService
     private let failSafeInstaller: ClamshellFailSafeInstaller
+    private let quotaContinuityGate = QuotaSnapshotContinuityGate()
     private let bundledDemoScenario: DemoQuotaScenario?
     private let startsInDemoMode: Bool
     private var refreshTimer: Timer?
@@ -109,7 +110,14 @@ final class AppModel: ObservableObject {
             applyPowerConfiguration()
         }
         startQuotaClientEvents()
-        quotaSamples = (try? sampleStore.load()) ?? []
+        let loadedSamples = (try? sampleStore.load()) ?? []
+        quotaSamples = QuotaSnapshotContinuityPolicy.repairedSamples(loadedSamples)
+        if quotaSamples != loadedSamples {
+            try? sampleStore.write(quotaSamples)
+        }
+        let bootstrapSnapshot = QuotaSnapshotContinuityPolicy.bootstrapSnapshot(from: quotaSamples)
+        quotaContinuityGate.reset(trustedSnapshot: bootstrapSnapshot)
+        quotaSnapshot = bootstrapSnapshot
         updateDerivedQuotaDisplay()
         refreshQuota()
         scheduleRefreshTimer()
@@ -158,10 +166,16 @@ final class AppModel: ObservableObject {
         let client = quotaClient
         let store = sampleStore
         let syncService = sampleSyncService
+        let continuityGate = quotaContinuityGate
 
         Task { [weak self] in
             let result = await Task.detached(priority: .utility) {
-                await Self.fetchQuotaSnapshot(client: client, store: store, syncService: syncService)
+                await Self.fetchQuotaSnapshot(
+                    client: client,
+                    store: store,
+                    syncService: syncService,
+                    continuityGate: continuityGate
+                )
             }.value
 
             guard let self else {
@@ -173,7 +187,7 @@ final class AppModel: ObservableObject {
 
             self.isRefreshingQuota = false
             switch result {
-            case let .success(fetchResult):
+            case let .success(.updated(fetchResult)):
                 self.quotaSnapshot = fetchResult.snapshot
                 self.quotaSamples = fetchResult.samples
                 self.projection = fetchResult.derivedDisplay.projection
@@ -183,6 +197,10 @@ final class AppModel: ObservableObject {
                 self.lastQuotaErrorMessage = nil
                 self.codexSignInState = .signedIn(fetchResult.account)
                 self.quotaSyncStatus = fetchResult.syncStatus
+            case let .success(.pendingConfirmation(account)):
+                self.lastQuotaErrorDate = nil
+                self.lastQuotaErrorMessage = nil
+                self.codexSignInState = .signedIn(account)
             case let .failure(error):
                 if error as? CodexRateLimitClient.ClientError == .needsSignIn {
                     guard !self.codexSignInState.isLoginFlowActive else {
@@ -285,6 +303,7 @@ final class AppModel: ObservableObject {
         }
 
         activeCodexLogin = nil
+        quotaContinuityGate.reset(trustedSnapshot: nil)
         quotaSnapshot = nil
         lastQuotaErrorDate = nil
         lastQuotaErrorMessage = nil
@@ -364,16 +383,26 @@ final class AppModel: ObservableObject {
     private nonisolated static func fetchQuotaSnapshot(
         client: CodexRateLimitClient,
         store: QuotaSampleStore,
-        syncService: CloudQuotaSampleSyncService
-    ) async -> Result<QuotaFetchResult, Error> {
+        syncService: CloudQuotaSampleSyncService,
+        continuityGate: QuotaSnapshotContinuityGate
+    ) async -> Result<QuotaFetchOutcome, Error> {
         do {
             let fetchResult = try await client.fetch()
             let response = fetchResult.response
-            let snapshot = response.codexSnapshot
             let capturedAt = Date()
+            let decision = continuityGate.evaluate(response.codexSnapshot, capturedAt: capturedAt)
+            guard case let .accepted(observations) = decision,
+                  let snapshot = observations.last?.snapshot else {
+                return .success(.pendingConfirmation(fetchResult.account))
+            }
+
             var samples = (try? store.load()) ?? []
-            if let sample = QuotaSample(snapshot: snapshot, capturedAt: capturedAt) {
-                samples = (try? store.merge([sample])) ?? QuotaSampleStore.mergedSamples(samples + [sample])
+            let acceptedSamples = observations.compactMap {
+                QuotaSample(snapshot: $0.snapshot, capturedAt: $0.capturedAt)
+            }
+            if acceptedSamples.isEmpty == false {
+                samples = (try? store.merge(acceptedSamples))
+                    ?? QuotaSampleStore.mergedSamples(samples + acceptedSamples)
             }
 
             let syncOutcome = await syncService.sync(localSamples: samples, currentSnapshot: snapshot)
@@ -383,14 +412,14 @@ final class AppModel: ObservableObject {
                 samples: persistedSamples,
                 now: capturedAt
             )
-            return .success(QuotaFetchResult(
+            return .success(.updated(QuotaFetchResult(
                 snapshot: snapshot,
                 samples: persistedSamples,
                 derivedDisplay: derivedDisplay,
                 capturedAt: capturedAt,
                 account: fetchResult.account,
                 syncStatus: syncOutcome.status
-            ))
+            )))
         } catch {
             return .failure(error)
         }
@@ -527,6 +556,7 @@ final class AppModel: ObservableObject {
         case let .loginCompleted(success, errorMessage):
             activeCodexLogin = nil
             if success {
+                quotaContinuityGate.reset(trustedSnapshot: nil)
                 codexSignInState = .unknown
                 refreshQuota()
             } else {
@@ -541,7 +571,11 @@ final class AppModel: ObservableObject {
             }
 
         case let .rateLimitsChanged(response):
-            quotaSnapshot = response.codexSnapshot
+            let snapshot = response.codexSnapshot
+            guard quotaContinuityGate.canPublishImmediately(snapshot, capturedAt: Date()) else {
+                break
+            }
+            quotaSnapshot = snapshot
             updateDerivedQuotaDisplay()
 
         case let .diagnostic(message):
@@ -666,6 +700,11 @@ private struct AppModelLiveState {
     let activeCodexLogin: CodexDeviceCodeLogin?
 }
 
+private enum QuotaFetchOutcome: Sendable {
+    case updated(QuotaFetchResult)
+    case pendingConfirmation(CodexAccountSnapshot?)
+}
+
 private struct QuotaFetchResult: Sendable {
     let snapshot: RateLimitSnapshot
     let samples: [QuotaSample]
@@ -673,6 +712,32 @@ private struct QuotaFetchResult: Sendable {
     let capturedAt: Date
     let account: CodexAccountSnapshot?
     let syncStatus: QuotaSyncStatus
+}
+
+final class QuotaSnapshotContinuityGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var policy = QuotaSnapshotContinuityPolicy()
+
+    func reset(trustedSnapshot: RateLimitSnapshot?) {
+        lock.withLock {
+            policy.reset(trustedSnapshot: trustedSnapshot)
+        }
+    }
+
+    func canPublishImmediately(_ snapshot: RateLimitSnapshot, capturedAt: Date) -> Bool {
+        lock.withLock {
+            policy.canPublishImmediately(snapshot, capturedAt: capturedAt)
+        }
+    }
+
+    func evaluate(
+        _ snapshot: RateLimitSnapshot,
+        capturedAt: Date
+    ) -> QuotaSnapshotContinuityDecision {
+        lock.withLock {
+            policy.evaluate(snapshot, capturedAt: capturedAt)
+        }
+    }
 }
 
 private struct QuotaDerivedDisplay: Sendable {
