@@ -111,7 +111,9 @@ final class AppModel: ObservableObject {
         }
         startQuotaClientEvents()
         let loadedSamples = (try? sampleStore.load()) ?? []
-        quotaSamples = QuotaSnapshotContinuityPolicy.repairedSamples(loadedSamples)
+        quotaSamples = QuotaSampleStore.compactedSamples(
+            QuotaSnapshotContinuityPolicy.repairedSamples(loadedSamples)
+        )
         if quotaSamples != loadedSamples {
             try? sampleStore.write(quotaSamples)
         }
@@ -401,12 +403,14 @@ final class AppModel: ObservableObject {
                 QuotaSample(snapshot: $0.snapshot, capturedAt: $0.capturedAt)
             }
             if acceptedSamples.isEmpty == false {
-                samples = (try? store.merge(acceptedSamples))
-                    ?? QuotaSampleStore.mergedSamples(samples + acceptedSamples)
+                samples = QuotaSampleStore.compactedSamples(
+                    QuotaSampleStore.mergedSamples(samples + acceptedSamples)
+                )
             }
 
             let syncOutcome = await syncService.sync(localSamples: samples, currentSnapshot: snapshot)
-            let persistedSamples = (try? store.merge(syncOutcome.samples)) ?? syncOutcome.samples
+            let persistedSamples = QuotaSampleStore.compactedSamples(syncOutcome.samples)
+            try? store.write(persistedSamples)
             let derivedDisplay = makeDerivedQuotaDisplay(
                 snapshot: snapshot,
                 samples: persistedSamples,
@@ -570,13 +574,8 @@ final class AppModel: ObservableObject {
                 }
             }
 
-        case let .rateLimitsChanged(response):
-            let snapshot = response.codexSnapshot
-            guard quotaContinuityGate.canPublishImmediately(snapshot, capturedAt: Date()) else {
-                break
-            }
-            quotaSnapshot = snapshot
-            updateDerivedQuotaDisplay()
+        case .rateLimitsChanged:
+            break
 
         case let .diagnostic(message):
             if lastQuotaErrorDate != nil || quotaSnapshot == nil {
@@ -721,12 +720,6 @@ final class QuotaSnapshotContinuityGate: @unchecked Sendable {
     func reset(trustedSnapshot: RateLimitSnapshot?) {
         lock.withLock {
             policy.reset(trustedSnapshot: trustedSnapshot)
-        }
-    }
-
-    func canPublishImmediately(_ snapshot: RateLimitSnapshot, capturedAt: Date) -> Bool {
-        lock.withLock {
-            policy.canPublishImmediately(snapshot, capturedAt: capturedAt)
         }
     }
 

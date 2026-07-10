@@ -178,6 +178,62 @@ final class QuotaSampleStoreTests: XCTestCase {
         )
     }
 
+    func testCompactionKeepsChangesHeartbeatsAndLatestSample() {
+        let samples = [
+            makeSample(capturedAt: 0, usedPercent: 10),
+            makeSample(capturedAt: 60, usedPercent: 10),
+            makeSample(capturedAt: 120, usedPercent: 11),
+            makeSample(capturedAt: 600, usedPercent: 11),
+            makeSample(capturedAt: 1_020, usedPercent: 11),
+            makeSample(capturedAt: 1_080, usedPercent: 11),
+        ]
+
+        let compacted = QuotaSampleStore.compactedSamples(samples, heartbeatInterval: 900)
+
+        XCTAssertEqual(
+            compacted.map(\.capturedAt),
+            [0, 120, 1_020, 1_080].map(Date.init(timeIntervalSince1970:))
+        )
+    }
+
+    func testCompactionKeepsResetAndFiveHourChanges() {
+        let first = makeSample(capturedAt: 0, resetAt: 10_000, usedPercent: 10)
+        let resetChanged = makeSample(capturedAt: 60, resetAt: 20_000, usedPercent: 10)
+        let fiveHourChanged = QuotaSample(
+            capturedAt: Date(timeIntervalSince1970: 120),
+            limitId: resetChanged.limitId,
+            limitName: resetChanged.limitName,
+            weeklyUsedPercent: resetChanged.weeklyUsedPercent,
+            weeklyWindowMinutes: resetChanged.weeklyWindowMinutes,
+            weeklyResetsAt: resetChanged.weeklyResetsAt,
+            fiveHourUsedPercent: 5,
+            fiveHourWindowMinutes: resetChanged.fiveHourWindowMinutes,
+            fiveHourResetsAt: resetChanged.fiveHourResetsAt,
+            planType: resetChanged.planType,
+            rateLimitReachedType: resetChanged.rateLimitReachedType
+        )
+
+        let compacted = QuotaSampleStore.compactedSamples(
+            [first, resetChanged, fiveHourChanged],
+            heartbeatInterval: 900
+        )
+
+        XCTAssertEqual(compacted, [first, resetChanged, fiveHourChanged])
+    }
+
+    func testCompactionIgnoresSmallResetTimestampJitter() {
+        let first = makeSample(capturedAt: 0, resetAt: 10_000, usedPercent: 10)
+        let jittered = makeSample(capturedAt: 60, resetAt: 10_004, usedPercent: 10)
+        let latest = makeSample(capturedAt: 120, resetAt: 10_004, usedPercent: 10)
+
+        let compacted = QuotaSampleStore.compactedSamples(
+            [first, jittered, latest],
+            heartbeatInterval: 900
+        )
+
+        XCTAssertEqual(compacted, [first, latest])
+    }
+
     private func makeSample(
         capturedAt: TimeInterval,
         limitId: String = "codex",

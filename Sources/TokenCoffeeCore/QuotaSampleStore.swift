@@ -118,17 +118,6 @@ public struct QuotaSnapshotContinuityPolicy: Sendable {
         candidateObservations = []
     }
 
-    public func canPublishImmediately(_ snapshot: RateLimitSnapshot, capturedAt: Date) -> Bool {
-        guard let trustedSnapshot else {
-            return true
-        }
-        return Self.requiresConfirmation(
-            snapshot,
-            after: trustedSnapshot,
-            capturedAt: capturedAt
-        ) == false
-    }
-
     public mutating func evaluate(
         _ snapshot: RateLimitSnapshot,
         capturedAt: Date
@@ -445,5 +434,65 @@ public struct QuotaSampleStore: Sendable {
 
     public static func mergedSamples(_ samples: [QuotaSample], limit: Int) -> [QuotaSample] {
         mergedSamples(samples, policy: .countOnly(limit))
+    }
+
+    public static func compactedSamples(
+        _ samples: [QuotaSample],
+        heartbeatInterval: TimeInterval = 15 * 60
+    ) -> [QuotaSample] {
+        let compacted = Dictionary(grouping: samples, by: \.limitId).values.flatMap { limitSamples in
+            let sorted = limitSamples.sorted { $0.capturedAt < $1.capturedAt }
+            guard let first = sorted.first else {
+                return [QuotaSample]()
+            }
+
+            var retained = [first]
+            for sample in sorted.dropFirst() {
+                guard let previous = retained.last else {
+                    retained.append(sample)
+                    continue
+                }
+                if sample.hasMaterialDifference(from: previous)
+                    || sample.capturedAt.timeIntervalSince(previous.capturedAt) >= heartbeatInterval {
+                    retained.append(sample)
+                }
+            }
+
+            if let latest = sorted.last,
+               retained.last?.syncIdentity != latest.syncIdentity {
+                retained.append(latest)
+            }
+            return retained
+        }
+
+        return compacted.sorted {
+            if $0.capturedAt == $1.capturedAt {
+                return $0.limitId < $1.limitId
+            }
+            return $0.capturedAt < $1.capturedAt
+        }
+    }
+}
+
+private extension QuotaSample {
+    func hasMaterialDifference(from other: QuotaSample) -> Bool {
+        limitName != other.limitName
+            || weeklyUsedPercent != other.weeklyUsedPercent
+            || weeklyWindowMinutes != other.weeklyWindowMinutes
+            || resetDateDiffers(weeklyResetsAt, other.weeklyResetsAt)
+            || fiveHourUsedPercent != other.fiveHourUsedPercent
+            || planType != other.planType
+            || rateLimitReachedType != other.rateLimitReachedType
+    }
+
+    private func resetDateDiffers(_ lhs: Date?, _ rhs: Date?) -> Bool {
+        switch (lhs, rhs) {
+        case let (lhs?, rhs?):
+            abs(lhs.timeIntervalSince(rhs)) > 5
+        case (nil, nil):
+            false
+        case (_?, nil), (nil, _?):
+            true
+        }
     }
 }
