@@ -178,6 +178,19 @@ final class QuotaSampleStoreTests: XCTestCase {
         )
     }
 
+    func testContinuityRepairRemovesLiveResetTimestampDropout() {
+        let trustedReset: TimeInterval = 20_000
+        let samples = [
+            makeSample(capturedAt: 1_000, resetAt: trustedReset, usedPercent: 13),
+            makeSample(capturedAt: 1_360, resetAt: trustedReset + 190, usedPercent: 1),
+            makeSample(capturedAt: 1_540, resetAt: trustedReset, usedPercent: 13),
+        ]
+
+        let repaired = QuotaSnapshotContinuityPolicy.repairedSamples(samples)
+
+        XCTAssertEqual(repaired, [samples[0], samples[2]])
+    }
+
     func testCompactionKeepsChangesHeartbeatsAndLatestSample() {
         let samples = [
             makeSample(capturedAt: 0, usedPercent: 10),

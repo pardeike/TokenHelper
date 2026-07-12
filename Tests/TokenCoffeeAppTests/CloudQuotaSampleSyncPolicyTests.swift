@@ -49,6 +49,23 @@ final class CloudQuotaSampleSyncPolicyTests: XCTestCase {
         XCTAssertEqual(samples, [newestMissing])
     }
 
+    func testContinuityCleanupDeletesRejectedRemoteSampleOnly() {
+        let trusted = sample(capturedAt: 1_000, resetAt: 20_000, usedPercent: 13)
+        let dropout = sample(capturedAt: 1_360, resetAt: 20_190, usedPercent: 1)
+        let recovered = sample(capturedAt: 1_540, resetAt: 20_000, usedPercent: 13)
+        let candidates = [trusted, dropout, recovered]
+        let repaired = QuotaSnapshotContinuityPolicy.repairedSamples(candidates)
+
+        let recordNames = CloudQuotaSampleSyncPolicy.continuityRejectedRecordNames(
+            candidateSamples: candidates,
+            repairedSamples: repaired,
+            remoteRecordNames: Set(candidates.map(\.syncRecordName)),
+            limit: 100
+        )
+
+        XCTAssertEqual(recordNames, [dropout.syncRecordName])
+    }
+
     func testCleanupUsesCurrentTimeAxisLeftEdgeOnly() {
         let windowStart = Date(timeIntervalSince1970: 1_000)
         let tooOld = sample(capturedAt: 999, limitId: "other", resetAt: 100)

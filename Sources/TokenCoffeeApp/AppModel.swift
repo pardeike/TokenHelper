@@ -409,7 +409,13 @@ final class AppModel: ObservableObject {
             }
 
             let syncOutcome = await syncService.sync(localSamples: samples, currentSnapshot: snapshot)
-            let persistedSamples = QuotaSampleStore.compactedSamples(syncOutcome.samples)
+            // CloudKit is another sample-ingress boundary. A bad snapshot can have
+            // been uploaded by an older build or another device, so do not trust
+            // the merged result merely because the live endpoint response passed
+            // the continuity gate above.
+            let persistedSamples = QuotaSampleStore.compactedSamples(
+                QuotaSnapshotContinuityPolicy.repairedSamples(syncOutcome.samples)
+            )
             try? store.write(persistedSamples)
             let derivedDisplay = makeDerivedQuotaDisplay(
                 snapshot: snapshot,

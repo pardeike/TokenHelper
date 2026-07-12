@@ -53,10 +53,13 @@ actor CloudQuotaSampleSyncService {
         currentSnapshot: RateLimitSnapshot? = nil
     ) async -> QuotaSampleSyncOutcome {
         let now = Date()
-        let normalizedLocalSamples = QuotaSampleStore.mergedSamples(
+        let localCandidates = QuotaSampleStore.mergedSamples(
             localSamples,
             policy: retentionPolicy,
             now: now
+        )
+        let normalizedLocalSamples = QuotaSampleStore.compactedSamples(
+            QuotaSnapshotContinuityPolicy.repairedSamples(localCandidates)
         )
         guard isConfigured else {
             cloudSyncLogger.info("Cloud quota sync skipped; CloudKit entitlement is not present")
@@ -161,11 +164,32 @@ actor CloudQuotaSampleSyncService {
                 cloudSyncLogger.info("Cloud quota legacy default-zone delete batch finished; deleted=\(legacyResult.recordIDsToDelete.count, privacy: .public)")
             }
 
-            let mergedSamples = QuotaSampleStore.mergedSamples(
-                normalizedLocalSamples + fetchedRemoteSamples + legacyDefaultZoneSamples,
+            let mergedCandidates = QuotaSampleStore.mergedSamples(
+                localCandidates + fetchedRemoteSamples + legacyDefaultZoneSamples,
                 policy: retentionPolicy,
                 now: now
             )
+            let continuityRepairedSamples = QuotaSnapshotContinuityPolicy.repairedSamples(mergedCandidates)
+            let mergedSamples = QuotaSampleStore.compactedSamples(continuityRepairedSamples)
+
+            let rejectedRecordNames = CloudQuotaSampleSyncPolicy.continuityRejectedRecordNames(
+                candidateSamples: mergedCandidates,
+                repairedSamples: continuityRepairedSamples,
+                remoteRecordNames: Set(state.remoteSamplesByRecordName.keys),
+                limit: Defaults.cleanupBatchSize
+            )
+            if rejectedRecordNames.isEmpty == false {
+                let rejectedRecordIDs = rejectedRecordNames.map {
+                    CKRecord.ID(recordName: $0, zoneID: Defaults.recordZoneID)
+                }
+                cloudSyncLogger.info(
+                    "Cloud quota continuity cleanup deleting rejected samples; count=\(rejectedRecordIDs.count, privacy: .public)"
+                )
+                try await applyChanges(saving: [], deleting: rejectedRecordIDs, to: database)
+                for recordName in rejectedRecordNames {
+                    state.remoteSamplesByRecordName.removeValue(forKey: recordName)
+                }
+            }
 
             state.lastSuccessfulSyncAt = now
             state.nextAllowedSyncAt = nil
@@ -697,6 +721,26 @@ enum CloudQuotaSampleSyncPolicy {
             .filter { $0.capturedAt <= uploadWatermark }
             .sorted { $0.capturedAt > $1.capturedAt }
         return Array((newSamples + recoverySamples).prefix(max(0, limit)))
+    }
+
+    static func continuityRejectedRecordNames(
+        candidateSamples: [QuotaSample],
+        repairedSamples: [QuotaSample],
+        remoteRecordNames: Set<String>,
+        limit: Int
+    ) -> [String] {
+        let retainedIdentities = Set(repairedSamples.map(\.syncIdentity))
+        return candidateSamples
+            .filter { retainedIdentities.contains($0.syncIdentity) == false }
+            .filter { remoteRecordNames.contains($0.syncRecordName) }
+            .sorted {
+                if $0.capturedAt == $1.capturedAt {
+                    return $0.syncRecordName < $1.syncRecordName
+                }
+                return $0.capturedAt < $1.capturedAt
+            }
+            .prefix(max(0, limit))
+            .map(\.syncRecordName)
     }
 
     static func markUploaded(_ samples: [QuotaSample], in state: inout CloudQuotaSampleSyncState) {
