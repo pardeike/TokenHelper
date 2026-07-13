@@ -39,6 +39,45 @@ final class QuotaGraphDisplaySamplerTests: XCTestCase {
         XCTAssertEqual(displaySamples, [samples[4]])
     }
 
+    func testObservedSeriesConnectsStoredHistoryToCurrentSnapshot() {
+        let samples = makeSamples(count: 3)
+        let now = Date(timeIntervalSince1970: 10)
+
+        let points = QuotaGraphObservedSeries.points(
+            from: samples,
+            currentUsedPercent: 7,
+            now: now
+        )
+
+        XCTAssertEqual(points.map(\.date), samples.map(\.capturedAt) + [now])
+        XCTAssertEqual(points.map(\.usedPercent), [0, 1, 2, 7])
+    }
+
+    func testObservedSeriesDoesNotDuplicatePointAtCurrentTime() {
+        let samples = makeSamples(count: 3)
+
+        let points = QuotaGraphObservedSeries.points(
+            from: samples,
+            currentUsedPercent: 7,
+            now: samples[2].capturedAt
+        )
+
+        XCTAssertEqual(points.count, samples.count)
+        XCTAssertEqual(points.last?.usedPercent, samples.last?.weeklyUsedPercent)
+    }
+
+    func testObservedSeriesUsesCurrentSnapshotWhenHistoryIsEmpty() {
+        let now = Date(timeIntervalSince1970: 10)
+
+        let points = QuotaGraphObservedSeries.points(
+            from: [],
+            currentUsedPercent: 7,
+            now: now
+        )
+
+        XCTAssertEqual(points, [QuotaGraphObservedPoint(date: now, usedPercent: 7)])
+    }
+
     private func makeSamples(count: Int) -> [QuotaSample] {
         (0..<count).map { index in
             QuotaSample(

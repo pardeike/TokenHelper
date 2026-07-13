@@ -157,6 +157,31 @@ final class QuotaSampleStoreTests: XCTestCase {
         XCTAssertEqual(snapshot?.secondary?.resetDate, oldReset)
     }
 
+    func testContinuityBootstrapUsesNewestConfirmedResetWhenOldWindowHasMoreSamples() {
+        let oldReset: TimeInterval = 20_000
+        let newReset: TimeInterval = 30_000
+        let oldSamples = (0..<20).map { index in
+            makeSample(
+                capturedAt: 1_000 + TimeInterval(index * 60),
+                resetAt: oldReset,
+                usedPercent: 54
+            )
+        }
+        let newSamples = [
+            makeSample(capturedAt: 2_200, resetAt: newReset, usedPercent: 1),
+            makeSample(capturedAt: 2_210, resetAt: newReset + 1, usedPercent: 1),
+            makeSample(capturedAt: 2_260, resetAt: newReset, usedPercent: 1),
+            makeSample(capturedAt: 2_320, resetAt: newReset, usedPercent: 1),
+        ]
+
+        let snapshot = QuotaSnapshotContinuityPolicy.bootstrapSnapshot(
+            from: oldSamples + newSamples
+        )
+
+        XCTAssertEqual(snapshot?.secondary?.usedPercent, 1)
+        XCTAssertEqual(snapshot?.secondary?.resetDate, Date(timeIntervalSince1970: newReset))
+    }
+
     func testContinuityRepairRemovesDropoutAndKeepsConfirmedEarlyReset() {
         let oldReset: TimeInterval = 20_000
         let newReset: TimeInterval = 30_000
@@ -206,6 +231,29 @@ final class QuotaSampleStoreTests: XCTestCase {
         XCTAssertEqual(
             compacted.map(\.capturedAt),
             [0, 120, 1_020, 1_080].map(Date.init(timeIntervalSince1970:))
+        )
+    }
+
+    func testCompactionPreservesEarlyResetConfirmationEvidence() {
+        let trustedReset: TimeInterval = 10_000
+        let newReset: TimeInterval = 20_000
+        let samples = [
+            makeSample(capturedAt: 1_000, resetAt: trustedReset, usedPercent: 42),
+            makeSample(capturedAt: 1_060, resetAt: trustedReset, usedPercent: 43),
+            makeSample(capturedAt: 1_120, resetAt: newReset, usedPercent: 0),
+            makeSample(capturedAt: 1_180, resetAt: newReset, usedPercent: 0),
+            makeSample(capturedAt: 1_240, resetAt: newReset, usedPercent: 0),
+        ]
+
+        let compacted = QuotaSampleStore.compactedSamples(samples)
+        let newWindowSamples = compacted.filter {
+            $0.weeklyResetsAt == Date(timeIntervalSince1970: newReset)
+        }
+
+        XCTAssertEqual(newWindowSamples.count, QuotaSnapshotContinuityPolicy.requiredConfirmationCount)
+        XCTAssertEqual(
+            QuotaSnapshotContinuityPolicy.repairedSamples(compacted),
+            compacted
         )
     }
 

@@ -93,11 +93,15 @@ struct CodexNativeUsageService: Sendable {
         planType: String,
         rateLimitReachedType: String?
     ) -> RateLimitSnapshot {
-        RateLimitSnapshot(
+        let windows = normalizedWindows(
+            primary: mapWindow(rateLimit?.primaryWindow),
+            secondary: mapWindow(rateLimit?.secondaryWindow)
+        )
+        return RateLimitSnapshot(
             limitId: limitId,
             limitName: limitName,
-            primary: mapWindow(rateLimit?.primaryWindow),
-            secondary: mapWindow(rateLimit?.secondaryWindow),
+            primary: windows.short,
+            secondary: windows.weekly,
             credits: credits.map {
                 CreditsSnapshot(
                     hasCredits: $0.hasCredits,
@@ -108,6 +112,32 @@ struct CodexNativeUsageService: Sendable {
             planType: planType,
             rateLimitReachedType: rateLimitReachedType
         )
+    }
+
+    private func normalizedWindows(
+        primary: RateLimitWindow?,
+        secondary: RateLimitWindow?
+    ) -> (short: RateLimitWindow?, weekly: RateLimitWindow?) {
+        switch (primary, secondary) {
+        case let (primary?, secondary?):
+            guard let primaryMinutes = primary.windowDurationMins,
+                  let secondaryMinutes = secondary.windowDurationMins,
+                  primaryMinutes != secondaryMinutes else {
+                return (primary, secondary)
+            }
+            return primaryMinutes < secondaryMinutes
+                ? (primary, secondary)
+                : (secondary, primary)
+
+        case let (window?, nil), let (nil, window?):
+            if window.windowDurationMins == Self.weeklyWindowMinutes {
+                return (nil, window)
+            }
+            return (window, nil)
+
+        case (nil, nil):
+            return (nil, nil)
+        }
     }
 
     private func mapWindow(_ window: CodexUsageWindow?) -> RateLimitWindow? {
@@ -128,6 +158,8 @@ struct CodexNativeUsageService: Sendable {
         }
         return (seconds + 59) / 60
     }
+
+    private static let weeklyWindowMinutes = 7 * 24 * 60
 
     private func mapHTTPError(_ error: CodexNativeHTTPError) -> CodexNativeUsageError {
         switch error {

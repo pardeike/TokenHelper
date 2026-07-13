@@ -155,32 +155,10 @@ public struct QuotaSnapshotContinuityPolicy: Sendable {
     }
 
     public static func bootstrapSnapshot(from samples: [QuotaSample]) -> RateLimitSnapshot? {
-        guard let latestDate = samples.map(\.capturedAt).max() else {
-            return nil
-        }
-
-        let cutoff = latestDate.addingTimeInterval(-24 * 60 * 60)
-        let recentSamples = samples.filter {
-            $0.capturedAt >= cutoff && $0.weeklyResetsAt != nil
-        }
-        let candidates = recentSamples.isEmpty ? samples : recentSamples
-        let grouped = Dictionary(grouping: candidates.compactMap { sample -> (String, QuotaSample)? in
-            guard let resetDate = sample.weeklyResetsAt else {
-                return nil
-            }
-            let resetMinute = Int64((resetDate.timeIntervalSince1970 / 60).rounded())
-            return ("\(sample.limitId)|\(resetMinute)", sample)
-        }, by: \.0)
-
-        let dominantGroup = grouped.values.max { lhs, rhs in
-            if lhs.count == rhs.count {
-                let lhsDate = lhs.map(\.1.capturedAt).max() ?? .distantPast
-                let rhsDate = rhs.map(\.1.capturedAt).max() ?? .distantPast
-                return lhsDate < rhsDate
-            }
-            return lhs.count < rhs.count
-        }
-        guard let sample = dominantGroup?.map(\.1).max(by: { $0.capturedAt < $1.capturedAt }) else {
+        let acceptedSamples = repairedSamples(samples)
+        guard let sample = acceptedSamples
+            .filter({ $0.weeklyResetsAt != nil })
+            .max(by: { $0.capturedAt < $1.capturedAt }) else {
             return nil
         }
         return snapshot(from: sample)
@@ -218,7 +196,7 @@ public struct QuotaSnapshotContinuityPolicy: Sendable {
         )
     }
 
-    private static func requiresConfirmation(
+    fileprivate static func requiresConfirmation(
         _ snapshot: RateLimitSnapshot,
         after trustedSnapshot: RateLimitSnapshot,
         capturedAt: Date
@@ -244,7 +222,7 @@ public struct QuotaSnapshotContinuityPolicy: Sendable {
         return oldWindowHasReset == false
     }
 
-    private static func sameCandidateWindow(
+    fileprivate static func sameCandidateWindow(
         _ lhs: RateLimitSnapshot,
         _ rhs: RateLimitSnapshot
     ) -> Bool {
@@ -263,7 +241,7 @@ public struct QuotaSnapshotContinuityPolicy: Sendable {
         }
     }
 
-    private static func snapshot(from sample: QuotaSample) -> RateLimitSnapshot {
+    fileprivate static func snapshot(from sample: QuotaSample) -> RateLimitSnapshot {
         RateLimitSnapshot(
             limitId: sample.limitId,
             limitName: sample.limitName,
@@ -447,12 +425,44 @@ public struct QuotaSampleStore: Sendable {
             }
 
             var retained = [first]
+            var confirmationCandidate: RateLimitSnapshot?
+            var retainedConfirmationCount = 0
             for sample in sorted.dropFirst() {
                 guard let previous = retained.last else {
                     retained.append(sample)
                     continue
                 }
-                if sample.hasMaterialDifference(from: previous)
+
+                let snapshot = QuotaSnapshotContinuityPolicy.snapshot(from: sample)
+                var preservesConfirmationEvidence = false
+
+                if let activeConfirmationCandidate = confirmationCandidate {
+                    if QuotaSnapshotContinuityPolicy.sameCandidateWindow(activeConfirmationCandidate, snapshot) {
+                        if retainedConfirmationCount < QuotaSnapshotContinuityPolicy.requiredConfirmationCount {
+                            retainedConfirmationCount += 1
+                            preservesConfirmationEvidence = true
+                        }
+                        if retainedConfirmationCount >= QuotaSnapshotContinuityPolicy.requiredConfirmationCount {
+                            clearConfirmationCandidate(&confirmationCandidate, count: &retainedConfirmationCount)
+                        }
+                    } else {
+                        clearConfirmationCandidate(&confirmationCandidate, count: &retainedConfirmationCount)
+                    }
+                }
+
+                if confirmationCandidate == nil,
+                   QuotaSnapshotContinuityPolicy.requiresConfirmation(
+                       snapshot,
+                       after: QuotaSnapshotContinuityPolicy.snapshot(from: previous),
+                       capturedAt: sample.capturedAt
+                   ) {
+                    confirmationCandidate = snapshot
+                    retainedConfirmationCount = 1
+                    preservesConfirmationEvidence = true
+                }
+
+                if preservesConfirmationEvidence
+                    || sample.hasMaterialDifference(from: previous)
                     || sample.capturedAt.timeIntervalSince(previous.capturedAt) >= heartbeatInterval {
                     retained.append(sample)
                 }
@@ -471,6 +481,14 @@ public struct QuotaSampleStore: Sendable {
             }
             return $0.capturedAt < $1.capturedAt
         }
+    }
+
+    private static func clearConfirmationCandidate(
+        _ candidate: inout RateLimitSnapshot?,
+        count: inout Int
+    ) {
+        candidate = nil
+        count = 0
     }
 }
 

@@ -641,14 +641,13 @@ private struct QuotaGraphView: View {
     }
 
     private var actualPoints: [GraphPoint] {
-        let stored = samples.map {
-            GraphPoint(date: $0.capturedAt, percent: graphPercent($0.weeklyUsedPercent), series: "actual")
+        QuotaGraphObservedSeries.points(
+            from: samples,
+            currentUsedPercent: snapshot?.secondary?.usedPercent,
+            now: now
+        ).map {
+            GraphPoint(date: $0.date, percent: graphPercent($0.usedPercent), series: "actual")
         }
-        if stored.isEmpty,
-           let weekly = snapshot?.secondary {
-            return [GraphPoint(date: now, percent: graphPercent(weekly.usedPercent), series: "actual")]
-        }
-        return stored
     }
 
     private func projectionSegments(now: Date, resetDate: Date, projected: Double) -> [ProjectionSegment] {
@@ -849,6 +848,41 @@ struct QuotaGraphIntensityBand: Equatable, Identifiable {
     let isLight: Bool
 
     var id: Int { index }
+}
+
+struct QuotaGraphObservedPoint: Equatable, Sendable {
+    let date: Date
+    let usedPercent: Double
+}
+
+enum QuotaGraphObservedSeries {
+    static func points(
+        from samples: [QuotaSample],
+        currentUsedPercent: Double?,
+        now: Date
+    ) -> [QuotaGraphObservedPoint] {
+        var points = samples
+            .sorted { $0.capturedAt < $1.capturedAt }
+            .map {
+                QuotaGraphObservedPoint(
+                    date: $0.capturedAt,
+                    usedPercent: $0.weeklyUsedPercent
+                )
+            }
+
+        guard let currentUsedPercent else {
+            return points
+        }
+
+        guard let last = points.last else {
+            return [QuotaGraphObservedPoint(date: now, usedPercent: currentUsedPercent)]
+        }
+
+        if last.date < now {
+            points.append(QuotaGraphObservedPoint(date: now, usedPercent: currentUsedPercent))
+        }
+        return points
+    }
 }
 
 private struct ProjectionSegment: Identifiable {

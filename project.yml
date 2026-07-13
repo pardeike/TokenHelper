@@ -135,6 +135,8 @@ targets:
       - target: TokenCoffee
     settings:
       base:
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: W65292CD8T
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.pardeike.TokenCoffeeAppTests
         BUNDLE_LOADER: "$(TEST_HOST)"

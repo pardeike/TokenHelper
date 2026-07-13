@@ -403,19 +403,17 @@ final class AppModel: ObservableObject {
                 QuotaSample(snapshot: $0.snapshot, capturedAt: $0.capturedAt)
             }
             if acceptedSamples.isEmpty == false {
-                samples = QuotaSampleStore.compactedSamples(
-                    QuotaSampleStore.mergedSamples(samples + acceptedSamples)
-                )
+                // Continuity confirmation needs the complete observation run.
+                // CloudQuotaSampleSyncService validates all ingress boundaries
+                // before compacting the trusted result for persistence.
+                samples = QuotaSampleStore.mergedSamples(samples + acceptedSamples)
             }
 
             let syncOutcome = await syncService.sync(localSamples: samples, currentSnapshot: snapshot)
-            // CloudKit is another sample-ingress boundary. A bad snapshot can have
-            // been uploaded by an older build or another device, so do not trust
-            // the merged result merely because the live endpoint response passed
-            // the continuity gate above.
-            let persistedSamples = QuotaSampleStore.compactedSamples(
-                QuotaSnapshotContinuityPolicy.repairedSamples(syncOutcome.samples)
-            )
+            // The sync service owns the CloudKit ingress trust boundary and
+            // returns a continuity-repaired, compacted result. Revalidating that
+            // compacted result would discard the evidence that confirmed a reset.
+            let persistedSamples = syncOutcome.samples
             try? store.write(persistedSamples)
             let derivedDisplay = makeDerivedQuotaDisplay(
                 snapshot: snapshot,

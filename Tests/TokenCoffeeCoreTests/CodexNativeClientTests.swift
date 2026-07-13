@@ -82,6 +82,77 @@ final class CodexNativeClientTests: XCTestCase {
         XCTAssertEqual(requests.first?.value(forHTTPHeaderField: "X-OpenAI-Fedramp"), "true")
     }
 
+    func testUsageServiceMapsWeeklyOnlyPrimaryWindowToWeeklyRole() async throws {
+        let http = MockCodexHTTPClient(responses: [
+            .json("""
+            {
+              "plan_type": "pro",
+              "rate_limit": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary_window": {
+                  "used_percent": 1,
+                  "limit_window_seconds": 604800,
+                  "reset_after_seconds": 603273,
+                  "reset_at": 1784527276
+                },
+                "secondary_window": null
+              }
+            }
+            """),
+        ])
+        let service = CodexNativeUsageService(configuration: testConfiguration(), httpClient: http)
+        let tokens = CodexAuthTokens(
+            idToken: makeJWT(auth: ["chatgpt_account_id": "account-123"]),
+            accessToken: "access-token",
+            refreshToken: "refresh-token",
+            lastRefresh: Date()
+        )
+
+        let response = try await service.fetchRateLimits(tokens: tokens)
+
+        XCTAssertNil(response.codexSnapshot.primary)
+        XCTAssertEqual(response.codexSnapshot.secondary?.usedPercent, 1)
+        XCTAssertEqual(response.codexSnapshot.secondary?.windowDurationMins, 10_080)
+        XCTAssertEqual(response.codexSnapshot.secondary?.resetsAt, 1_784_527_276)
+    }
+
+    func testUsageServiceNormalizesReversedShortAndWeeklyWindows() async throws {
+        let http = MockCodexHTTPClient(responses: [
+            .json("""
+            {
+              "plan_type": "pro",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 20,
+                  "limit_window_seconds": 604800,
+                  "reset_at": 1784527276
+                },
+                "secondary_window": {
+                  "used_percent": 4,
+                  "limit_window_seconds": 18000,
+                  "reset_at": 1783924276
+                }
+              }
+            }
+            """),
+        ])
+        let service = CodexNativeUsageService(configuration: testConfiguration(), httpClient: http)
+        let tokens = CodexAuthTokens(
+            idToken: makeJWT(auth: ["chatgpt_account_id": "account-123"]),
+            accessToken: "access-token",
+            refreshToken: "refresh-token",
+            lastRefresh: Date()
+        )
+
+        let response = try await service.fetchRateLimits(tokens: tokens)
+
+        XCTAssertEqual(response.codexSnapshot.primary?.usedPercent, 4)
+        XCTAssertEqual(response.codexSnapshot.primary?.windowDurationMins, 300)
+        XCTAssertEqual(response.codexSnapshot.secondary?.usedPercent, 20)
+        XCTAssertEqual(response.codexSnapshot.secondary?.windowDurationMins, 10_080)
+    }
+
     func testFetchWithoutTokensRequiresSignIn() async throws {
         let client = CodexRateLimitClient(
             configuration: testConfiguration(),
