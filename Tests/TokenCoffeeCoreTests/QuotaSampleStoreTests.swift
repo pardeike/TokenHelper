@@ -109,6 +109,223 @@ final class QuotaSampleStoreTests: XCTestCase {
         XCTAssertEqual(policy.trustedSnapshot, reset)
     }
 
+    func testContinuityPolicyNeverConfirmsRepeatedUsageRegressionInSameWindow() {
+        let trusted = makeSnapshot(usedPercent: 40, resetAt: 20_000)
+        var policy = QuotaSnapshotContinuityPolicy(trustedSnapshot: trusted)
+
+        for (capturedAt, usedPercent) in [(1_000.0, 24.0), (1_060.0, 24.0), (1_120.0, 25.0)] {
+            XCTAssertEqual(
+                policy.evaluate(
+                    makeSnapshot(usedPercent: usedPercent, resetAt: 20_000),
+                    capturedAt: Date(timeIntervalSince1970: capturedAt)
+                ),
+                .pending
+            )
+        }
+
+        XCTAssertEqual(policy.trustedSnapshot, trusted)
+    }
+
+    func testContinuityPolicyRejectsHighSpikeAndRecoversWithCorroboratedIncrease() {
+        let trusted = makeSnapshot(usedPercent: 40, resetAt: 20_000)
+        let highSpike = makeSnapshot(usedPercent: 80, resetAt: 20_000)
+        let recovered = makeSnapshot(usedPercent: 41, resetAt: 20_000)
+        var policy = QuotaSnapshotContinuityPolicy(trustedSnapshot: trusted)
+
+        XCTAssertEqual(
+            policy.evaluate(highSpike, capturedAt: Date(timeIntervalSince1970: 1_000)),
+            .pending
+        )
+        XCTAssertEqual(
+            policy.evaluate(recovered, capturedAt: Date(timeIntervalSince1970: 1_060)),
+            .pending
+        )
+        XCTAssertEqual(
+            policy.evaluate(recovered, capturedAt: Date(timeIntervalSince1970: 1_120)),
+            .accepted([
+                QuotaSnapshotObservation(
+                    snapshot: recovered,
+                    capturedAt: Date(timeIntervalSince1970: 1_060)
+                ),
+                QuotaSnapshotObservation(
+                    snapshot: recovered,
+                    capturedAt: Date(timeIntervalSince1970: 1_120)
+                ),
+            ])
+        )
+        XCTAssertEqual(policy.trustedSnapshot, recovered)
+
+        let increased = makeSnapshot(usedPercent: 42, resetAt: 20_000)
+        let higher = makeSnapshot(usedPercent: 50, resetAt: 20_000)
+        XCTAssertEqual(
+            policy.evaluate(increased, capturedAt: Date(timeIntervalSince1970: 1_180)),
+            .pending
+        )
+        XCTAssertEqual(
+            policy.evaluate(higher, capturedAt: Date(timeIntervalSince1970: 1_240)),
+            .accepted([
+                QuotaSnapshotObservation(
+                    snapshot: increased,
+                    capturedAt: Date(timeIntervalSince1970: 1_180)
+                ),
+                QuotaSnapshotObservation(
+                    snapshot: increased,
+                    capturedAt: Date(timeIntervalSince1970: 1_240)
+                ),
+            ])
+        )
+        XCTAssertEqual(policy.trustedSnapshot, increased)
+    }
+
+    func testContinuityPolicyPersistsCorroboratedIncreaseAcrossRepair() {
+        let resetAt: TimeInterval = 20_000
+        let baseline = makeSample(capturedAt: 1_000, resetAt: resetAt, usedPercent: 40)
+        let increased = makeSnapshot(usedPercent: 41, resetAt: resetAt)
+        let corroborator = makeSnapshot(usedPercent: 42, resetAt: resetAt)
+        var policy = QuotaSnapshotContinuityPolicy(
+            trustedSnapshot: makeSnapshot(usedPercent: 40, resetAt: resetAt)
+        )
+
+        XCTAssertEqual(
+            policy.evaluate(increased, capturedAt: Date(timeIntervalSince1970: 1_060)),
+            .pending
+        )
+        let decision = policy.evaluate(
+            corroborator,
+            capturedAt: Date(timeIntervalSince1970: 1_120)
+        )
+        guard case let .accepted(observations) = decision else {
+            return XCTFail("Expected the corroborated increase to be accepted")
+        }
+
+        let acceptedSamples = observations.compactMap {
+            QuotaSample(snapshot: $0.snapshot, capturedAt: $0.capturedAt)
+        }
+        let persisted = QuotaSnapshotContinuityPolicy.repairedSamples(
+            [baseline] + acceptedSamples
+        )
+
+        XCTAssertEqual(persisted.map(\.weeklyUsedPercent), [40, 41, 41])
+        XCTAssertEqual(
+            persisted.map(\.capturedAt),
+            [1_000, 1_060, 1_120].map(Date.init(timeIntervalSince1970:))
+        )
+        XCTAssertEqual(QuotaSnapshotContinuityPolicy.repairedSamples(persisted), persisted)
+        XCTAssertEqual(
+            QuotaSnapshotContinuityPolicy.bootstrapSnapshot(from: persisted)?.secondary?.usedPercent,
+            41
+        )
+    }
+
+    func testContinuityPolicyRecoversFromUncorroboratedInitialSpike() {
+        let resetAt: TimeInterval = 20_000
+        let spike = makeSnapshot(usedPercent: 80, resetAt: resetAt)
+        let recovered = makeSnapshot(usedPercent: 40, resetAt: resetAt)
+        var policy = QuotaSnapshotContinuityPolicy()
+
+        let initialDecision = policy.evaluate(
+            spike,
+            capturedAt: Date(timeIntervalSince1970: 900)
+        )
+        XCTAssertEqual(
+            initialDecision,
+            .accepted([
+                QuotaSnapshotObservation(
+                    snapshot: spike,
+                    capturedAt: Date(timeIntervalSince1970: 900)
+                ),
+            ])
+        )
+        XCTAssertEqual(
+            policy.evaluate(recovered, capturedAt: Date(timeIntervalSince1970: 1_000)),
+            .pending
+        )
+        XCTAssertEqual(
+            policy.evaluate(recovered, capturedAt: Date(timeIntervalSince1970: 1_060)),
+            .pending
+        )
+
+        let recoveryDecision = policy.evaluate(
+            recovered,
+            capturedAt: Date(timeIntervalSince1970: 1_090)
+        )
+        guard case let .accepted(recoveryObservations) = recoveryDecision else {
+            return XCTFail("Expected the lower run to replace the uncorroborated baseline")
+        }
+        XCTAssertEqual(recoveryObservations.count, QuotaSnapshotContinuityPolicy.requiredConfirmationCount)
+        XCTAssertEqual(policy.trustedSnapshot, recovered)
+
+        let observations = [initialDecision, recoveryDecision].flatMap { decision in
+            guard case let .accepted(accepted) = decision else {
+                return [QuotaSnapshotObservation]()
+            }
+            return accepted
+        }
+        let persisted = QuotaSnapshotContinuityPolicy.repairedSamples(
+            observations.compactMap {
+                QuotaSample(snapshot: $0.snapshot, capturedAt: $0.capturedAt)
+            }
+        )
+
+        XCTAssertEqual(persisted.map(\.weeklyUsedPercent), [40, 40, 40])
+        XCTAssertEqual(QuotaSnapshotContinuityPolicy.repairedSamples(persisted), persisted)
+    }
+
+    func testContinuityPolicyRecoversFromInitialSpikeAfterBootstrap() {
+        let resetAt: TimeInterval = 20_000
+        let spike = makeSample(capturedAt: 900, resetAt: resetAt, usedPercent: 80)
+        let recovered = makeSnapshot(usedPercent: 40, resetAt: resetAt)
+        guard let bootstrap = QuotaSnapshotContinuityPolicy.bootstrap(from: [spike]) else {
+            return XCTFail("Expected the initial sample to produce bootstrap state")
+        }
+        var policy = QuotaSnapshotContinuityPolicy(
+            trustedSnapshot: bootstrap.snapshot,
+            isCorroborated: bootstrap.isCorroborated
+        )
+
+        XCTAssertFalse(bootstrap.isCorroborated)
+        XCTAssertEqual(
+            policy.evaluate(recovered, capturedAt: Date(timeIntervalSince1970: 1_000)),
+            .pending
+        )
+        XCTAssertEqual(
+            policy.evaluate(recovered, capturedAt: Date(timeIntervalSince1970: 1_060)),
+            .pending
+        )
+        XCTAssertNotEqual(
+            policy.evaluate(recovered, capturedAt: Date(timeIntervalSince1970: 1_090)),
+            .pending
+        )
+        XCTAssertEqual(policy.trustedSnapshot, recovered)
+    }
+
+    func testContinuityPolicyDoesNotReplaceCorroboratedInitialBaseline() {
+        let resetAt: TimeInterval = 20_000
+        let baseline = makeSnapshot(usedPercent: 80, resetAt: resetAt)
+        let lower = makeSnapshot(usedPercent: 40, resetAt: resetAt)
+        var policy = QuotaSnapshotContinuityPolicy()
+
+        XCTAssertNotEqual(
+            policy.evaluate(baseline, capturedAt: Date(timeIntervalSince1970: 900)),
+            .pending
+        )
+        XCTAssertNotEqual(
+            policy.evaluate(baseline, capturedAt: Date(timeIntervalSince1970: 960)),
+            .pending
+        )
+        for capturedAt in [1_000.0, 1_060.0, 1_090.0] {
+            XCTAssertEqual(
+                policy.evaluate(
+                    lower,
+                    capturedAt: Date(timeIntervalSince1970: capturedAt)
+                ),
+                .pending
+            )
+        }
+
+        XCTAssertEqual(policy.trustedSnapshot, baseline)
+    }
+
     func testContinuityPolicyDoesNotConfirmMovingFallbackWindow() {
         let trusted = makeSnapshot(usedPercent: 54, resetAt: 10_000)
         var policy = QuotaSnapshotContinuityPolicy(trustedSnapshot: trusted)
@@ -148,7 +365,8 @@ final class QuotaSampleStoreTests: XCTestCase {
             makeSample(capturedAt: 1_000, resetAt: oldReset.timeIntervalSince1970, usedPercent: 53),
             makeSample(capturedAt: 1_060, resetAt: oldReset.timeIntervalSince1970, usedPercent: 53),
             makeSample(capturedAt: 1_120, resetAt: oldReset.timeIntervalSince1970, usedPercent: 54),
-            makeSample(capturedAt: 1_180, resetAt: dropoutReset.timeIntervalSince1970, usedPercent: 0),
+            makeSample(capturedAt: 1_180, resetAt: oldReset.timeIntervalSince1970, usedPercent: 54),
+            makeSample(capturedAt: 1_240, resetAt: dropoutReset.timeIntervalSince1970, usedPercent: 0),
         ]
 
         let snapshot = QuotaSnapshotContinuityPolicy.bootstrapSnapshot(from: samples)
@@ -216,6 +434,48 @@ final class QuotaSampleStoreTests: XCTestCase {
         XCTAssertEqual(repaired, [samples[0], samples[2]])
     }
 
+    func testContinuityRepairRemovesConfirmedLengthUsageDetourInSameWindow() {
+        let resetAt: TimeInterval = 20_000
+        let samples = [
+            makeSample(capturedAt: 1_000, resetAt: resetAt, usedPercent: 40),
+            makeSample(capturedAt: 1_060, resetAt: resetAt, usedPercent: 40),
+            makeSample(capturedAt: 1_840, resetAt: resetAt, usedPercent: 24),
+            makeSample(capturedAt: 1_900, resetAt: resetAt, usedPercent: 24),
+            makeSample(capturedAt: 1_960, resetAt: resetAt, usedPercent: 25),
+            makeSample(capturedAt: 2_800, resetAt: resetAt, usedPercent: 40),
+            makeSample(capturedAt: 2_860, resetAt: resetAt, usedPercent: 41),
+            makeSample(capturedAt: 2_920, resetAt: resetAt, usedPercent: 41),
+        ]
+
+        let repaired = QuotaSnapshotContinuityPolicy.repairedSamples(samples)
+
+        XCTAssertEqual(repaired, [samples[0], samples[1], samples[5], samples[6], samples[7]])
+    }
+
+    func testContinuityRepairRejectsHighSpikeAndKeepsPersistentNormalRun() {
+        let resetAt: TimeInterval = 20_000
+        let samples = [
+            makeSample(capturedAt: 1_000, resetAt: resetAt, usedPercent: 40),
+            makeSample(capturedAt: 1_060, resetAt: resetAt, usedPercent: 80),
+            makeSample(capturedAt: 1_120, resetAt: resetAt, usedPercent: 41),
+            makeSample(capturedAt: 1_180, resetAt: resetAt, usedPercent: 41),
+            makeSample(capturedAt: 1_240, resetAt: resetAt, usedPercent: 42),
+            makeSample(capturedAt: 1_300, resetAt: resetAt, usedPercent: 50),
+        ]
+
+        let repaired = QuotaSnapshotContinuityPolicy.repairedSamples(samples)
+
+        XCTAssertEqual(
+            repaired.map(\.weeklyUsedPercent),
+            [40, 41, 41, 42, 42]
+        )
+        XCTAssertEqual(
+            repaired.map(\.capturedAt),
+            [1_000, 1_120, 1_180, 1_240, 1_300].map(Date.init(timeIntervalSince1970:))
+        )
+        XCTAssertEqual(QuotaSnapshotContinuityPolicy.repairedSamples(repaired), repaired)
+    }
+
     func testCompactionKeepsChangesHeartbeatsAndLatestSample() {
         let samples = [
             makeSample(capturedAt: 0, usedPercent: 10),
@@ -230,7 +490,7 @@ final class QuotaSampleStoreTests: XCTestCase {
 
         XCTAssertEqual(
             compacted.map(\.capturedAt),
-            [0, 120, 1_020, 1_080].map(Date.init(timeIntervalSince1970:))
+            [0, 120, 600, 1_080].map(Date.init(timeIntervalSince1970:))
         )
     }
 
@@ -240,9 +500,10 @@ final class QuotaSampleStoreTests: XCTestCase {
         let samples = [
             makeSample(capturedAt: 1_000, resetAt: trustedReset, usedPercent: 42),
             makeSample(capturedAt: 1_060, resetAt: trustedReset, usedPercent: 43),
-            makeSample(capturedAt: 1_120, resetAt: newReset, usedPercent: 0),
+            makeSample(capturedAt: 1_120, resetAt: trustedReset, usedPercent: 43),
             makeSample(capturedAt: 1_180, resetAt: newReset, usedPercent: 0),
             makeSample(capturedAt: 1_240, resetAt: newReset, usedPercent: 0),
+            makeSample(capturedAt: 1_300, resetAt: newReset, usedPercent: 0),
         ]
 
         let compacted = QuotaSampleStore.compactedSamples(samples)

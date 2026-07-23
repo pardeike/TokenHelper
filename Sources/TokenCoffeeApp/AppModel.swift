@@ -117,9 +117,12 @@ final class AppModel: ObservableObject {
         if quotaSamples != loadedSamples {
             try? sampleStore.write(quotaSamples)
         }
-        let bootstrapSnapshot = QuotaSnapshotContinuityPolicy.bootstrapSnapshot(from: quotaSamples)
-        quotaContinuityGate.reset(trustedSnapshot: bootstrapSnapshot)
-        quotaSnapshot = bootstrapSnapshot
+        let bootstrap = QuotaSnapshotContinuityPolicy.bootstrap(from: quotaSamples)
+        quotaContinuityGate.reset(
+            trustedSnapshot: bootstrap?.snapshot,
+            isCorroborated: bootstrap?.isCorroborated ?? false
+        )
+        quotaSnapshot = bootstrap?.snapshot
         updateDerivedQuotaDisplay()
         refreshQuota()
         scheduleRefreshTimer()
@@ -721,9 +724,15 @@ final class QuotaSnapshotContinuityGate: @unchecked Sendable {
     private let lock = NSLock()
     private var policy = QuotaSnapshotContinuityPolicy()
 
-    func reset(trustedSnapshot: RateLimitSnapshot?) {
+    func reset(
+        trustedSnapshot: RateLimitSnapshot?,
+        isCorroborated: Bool = true
+    ) {
         lock.withLock {
-            policy.reset(trustedSnapshot: trustedSnapshot)
+            policy.reset(
+                trustedSnapshot: trustedSnapshot,
+                isCorroborated: isCorroborated
+            )
         }
     }
 

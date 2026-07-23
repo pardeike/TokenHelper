@@ -102,66 +102,212 @@ public enum QuotaSnapshotContinuityDecision: Equatable, Sendable {
     case pending
 }
 
+public struct QuotaSnapshotContinuityBootstrap: Equatable, Sendable {
+    public let snapshot: RateLimitSnapshot
+    public let isCorroborated: Bool
+
+    public init(snapshot: RateLimitSnapshot, isCorroborated: Bool) {
+        self.snapshot = snapshot
+        self.isCorroborated = isCorroborated
+    }
+}
+
 public struct QuotaSnapshotContinuityPolicy: Sendable {
     public static let requiredConfirmationCount = 3
     public static let requiredConfirmationDuration: TimeInterval = 90
 
     public private(set) var trustedSnapshot: RateLimitSnapshot?
-    private var candidateObservations: [QuotaSnapshotObservation] = []
+    private var resetCandidateObservations: [QuotaSnapshotObservation] = []
+    private var increaseCandidateObservations: [QuotaSnapshotObservation] = []
+    private var trustedSnapshotIsCorroborated: Bool
+    private var uncorroboratedTrustedObservation: QuotaSnapshotObservation?
+    private var discardedUncorroboratedTrustedObservation: QuotaSnapshotObservation?
+    private var trustedSnapshotCapturedAt: Date?
 
-    public init(trustedSnapshot: RateLimitSnapshot? = nil) {
+    public init(
+        trustedSnapshot: RateLimitSnapshot? = nil,
+        isCorroborated: Bool = true
+    ) {
         self.trustedSnapshot = trustedSnapshot
+        trustedSnapshotIsCorroborated = trustedSnapshot != nil && isCorroborated
     }
 
-    public mutating func reset(trustedSnapshot: RateLimitSnapshot?) {
+    public mutating func reset(
+        trustedSnapshot: RateLimitSnapshot?,
+        isCorroborated: Bool = true
+    ) {
         self.trustedSnapshot = trustedSnapshot
-        candidateObservations = []
+        trustedSnapshotIsCorroborated = trustedSnapshot != nil && isCorroborated
+        uncorroboratedTrustedObservation = nil
+        discardedUncorroboratedTrustedObservation = nil
+        trustedSnapshotCapturedAt = nil
+        clearCandidates()
     }
 
     public mutating func evaluate(
         _ snapshot: RateLimitSnapshot,
         capturedAt: Date
     ) -> QuotaSnapshotContinuityDecision {
+        discardedUncorroboratedTrustedObservation = nil
         let observation = QuotaSnapshotObservation(snapshot: snapshot, capturedAt: capturedAt)
         guard let trustedSnapshot else {
             self.trustedSnapshot = snapshot
-            candidateObservations = []
+            trustedSnapshotIsCorroborated = false
+            uncorroboratedTrustedObservation = observation
+            trustedSnapshotCapturedAt = capturedAt
+            clearCandidates()
             return .accepted([observation])
+        }
+
+        if Self.sameKnownWindow(trustedSnapshot, snapshot) {
+            if Self.isUsageIncrease(snapshot, after: trustedSnapshot) {
+                // An increase is plausible, but one uncorroborated high response
+                // must not replace the established baseline and make recovery
+                // through lower correct values impossible.
+                resetCandidateObservations = []
+                return evaluateIncreaseCandidate(observation)
+            }
+            if Self.isUsageDecrease(snapshot, after: trustedSnapshot) {
+                if trustedSnapshotIsCorroborated == false {
+                    return evaluateUncorroboratedBaselineRecovery(observation)
+                }
+                // Weekly usage is monotonic within a known reset window. Repeated
+                // lower values are not reset evidence and must not become trusted.
+                clearCandidates()
+                return .pending
+            }
         }
 
         guard Self.requiresConfirmation(snapshot, after: trustedSnapshot, capturedAt: capturedAt) else {
             self.trustedSnapshot = snapshot
-            candidateObservations = []
+            trustedSnapshotIsCorroborated = true
+            uncorroboratedTrustedObservation = nil
+            trustedSnapshotCapturedAt = capturedAt
+            clearCandidates()
             return .accepted([observation])
         }
 
-        if let candidate = candidateObservations.last,
+        if let candidate = resetCandidateObservations.last,
            Self.sameCandidateWindow(candidate.snapshot, snapshot) {
-            candidateObservations.append(observation)
+            resetCandidateObservations.append(observation)
         } else {
-            candidateObservations = [observation]
+            resetCandidateObservations = [observation]
         }
 
-        guard let firstCandidate = candidateObservations.first,
-              candidateObservations.count >= Self.requiredConfirmationCount,
+        guard let firstCandidate = resetCandidateObservations.first,
+              resetCandidateObservations.count >= Self.requiredConfirmationCount,
               capturedAt.timeIntervalSince(firstCandidate.capturedAt) >= Self.requiredConfirmationDuration else {
             return .pending
         }
 
-        let accepted = candidateObservations
+        let accepted = resetCandidateObservations
         self.trustedSnapshot = snapshot
-        candidateObservations = []
+        trustedSnapshotIsCorroborated = true
+        uncorroboratedTrustedObservation = nil
+        trustedSnapshotCapturedAt = capturedAt
+        clearCandidates()
         return .accepted(accepted)
     }
 
-    public static func bootstrapSnapshot(from samples: [QuotaSample]) -> RateLimitSnapshot? {
+    private mutating func evaluateIncreaseCandidate(
+        _ observation: QuotaSnapshotObservation
+    ) -> QuotaSnapshotContinuityDecision {
+        if let candidate = increaseCandidateObservations.last,
+           Self.canCorroborateIncrease(observation.snapshot, after: candidate.snapshot) {
+            resetCandidateObservations = []
+            if Self.hasSameUsage(candidate.snapshot, observation.snapshot) {
+                trustedSnapshot = observation.snapshot
+                trustedSnapshotIsCorroborated = true
+                uncorroboratedTrustedObservation = nil
+                trustedSnapshotCapturedAt = observation.capturedAt
+                clearCandidates()
+                return .accepted([candidate, observation])
+            }
+
+            // A still-higher response corroborates the previous observation, not
+            // its own new value. Advance by one observation and leave the newest
+            // value pending so no high endpoint is trusted without evidence. The
+            // repeated trusted value records that corroboration across repair,
+            // compaction, Cloud sync, and restart.
+            trustedSnapshot = candidate.snapshot
+            trustedSnapshotIsCorroborated = true
+            uncorroboratedTrustedObservation = nil
+            trustedSnapshotCapturedAt = observation.capturedAt
+            increaseCandidateObservations = [observation]
+            let confirmation = QuotaSnapshotObservation(
+                snapshot: candidate.snapshot,
+                capturedAt: observation.capturedAt
+            )
+            return .accepted([candidate, confirmation])
+        }
+
+        increaseCandidateObservations = [observation]
+        return .pending
+    }
+
+    private mutating func evaluateUncorroboratedBaselineRecovery(
+        _ observation: QuotaSnapshotObservation
+    ) -> QuotaSnapshotContinuityDecision {
+        // The first response has no predecessor that can establish its validity.
+        // A sustained, nondecreasing lower run may replace only that initial
+        // baseline; corroborated baselines still reject same-window decreases.
+        increaseCandidateObservations = []
+        if let candidate = resetCandidateObservations.last,
+           Self.sameCandidateWindow(candidate.snapshot, observation.snapshot),
+           Self.canCorroborateIncrease(observation.snapshot, after: candidate.snapshot) {
+            resetCandidateObservations.append(observation)
+        } else {
+            resetCandidateObservations = [observation]
+        }
+
+        guard let firstCandidate = resetCandidateObservations.first,
+              resetCandidateObservations.count >= Self.requiredConfirmationCount,
+              observation.capturedAt.timeIntervalSince(firstCandidate.capturedAt)
+                >= Self.requiredConfirmationDuration else {
+            return .pending
+        }
+
+        let accepted = resetCandidateObservations
+        discardedUncorroboratedTrustedObservation = uncorroboratedTrustedObservation
+        trustedSnapshot = observation.snapshot
+        trustedSnapshotIsCorroborated = true
+        uncorroboratedTrustedObservation = nil
+        trustedSnapshotCapturedAt = observation.capturedAt
+        clearCandidates()
+        return .accepted(accepted)
+    }
+
+    private mutating func clearCandidates() {
+        resetCandidateObservations = []
+        increaseCandidateObservations = []
+    }
+
+    public static func bootstrap(from samples: [QuotaSample]) -> QuotaSnapshotContinuityBootstrap? {
         let acceptedSamples = repairedSamples(samples)
-        guard let sample = acceptedSamples
-            .filter({ $0.weeklyResetsAt != nil })
-            .max(by: { $0.capturedAt < $1.capturedAt }) else {
+        var policiesByLimitId: [String: QuotaSnapshotContinuityPolicy] = [:]
+        for sample in acceptedSamples where sample.weeklyResetsAt != nil {
+            var policy = policiesByLimitId[sample.limitId] ?? QuotaSnapshotContinuityPolicy()
+            _ = policy.evaluate(snapshot(from: sample), capturedAt: sample.capturedAt)
+            policiesByLimitId[sample.limitId] = policy
+        }
+
+        guard let policy = policiesByLimitId.values
+            .filter({ $0.trustedSnapshot != nil })
+            .max(by: {
+                ($0.trustedSnapshotCapturedAt ?? .distantPast)
+                    < ($1.trustedSnapshotCapturedAt ?? .distantPast)
+            }),
+              let snapshot = policy.trustedSnapshot else {
             return nil
         }
-        return snapshot(from: sample)
+        return QuotaSnapshotContinuityBootstrap(
+            snapshot: snapshot,
+            isCorroborated: policy.trustedSnapshotIsCorroborated
+        )
+    }
+
+    public static func bootstrapSnapshot(from samples: [QuotaSample]) -> RateLimitSnapshot? {
+        bootstrap(from: samples)?.snapshot
     }
 
     public static func repairedSamples(_ samples: [QuotaSample]) -> [QuotaSample] {
@@ -171,10 +317,6 @@ public struct QuotaSnapshotContinuityPolicy: Sendable {
             }
             return lhs.capturedAt < rhs.capturedAt
         }
-        let samplesByObservation = Dictionary(
-            sortedSamples.map { (observationKey(sample: $0), $0) },
-            uniquingKeysWith: { _, replacement in replacement }
-        )
         var policiesByLimitId: [String: QuotaSnapshotContinuityPolicy] = [:]
         var repaired: [QuotaSample] = []
 
@@ -182,11 +324,16 @@ public struct QuotaSnapshotContinuityPolicy: Sendable {
             var policy = policiesByLimitId[sample.limitId] ?? QuotaSnapshotContinuityPolicy()
             let decision = policy.evaluate(snapshot(from: sample), capturedAt: sample.capturedAt)
             policiesByLimitId[sample.limitId] = policy
+            if let discarded = policy.discardedUncorroboratedTrustedObservation {
+                repaired.removeAll {
+                    observationKey(sample: $0) == observationKey(observation: discarded)
+                }
+            }
             guard case let .accepted(observations) = decision else {
                 continue
             }
             repaired.append(contentsOf: observations.compactMap {
-                samplesByObservation[observationKey(observation: $0)]
+                QuotaSample(snapshot: $0.snapshot, capturedAt: $0.capturedAt)
             })
         }
 
@@ -220,6 +367,63 @@ public struct QuotaSnapshotContinuityPolicy: Sendable {
         let oldWindowHasReset = capturedAt >= trustedResetDate.addingTimeInterval(-scheduledResetGrace)
             && resetDate > trustedResetDate.addingTimeInterval(resetTolerance)
         return oldWindowHasReset == false
+    }
+
+    fileprivate static func sameKnownWindow(
+        _ lhs: RateLimitSnapshot,
+        _ rhs: RateLimitSnapshot
+    ) -> Bool {
+        guard lhs.limitId == rhs.limitId,
+              let lhsReset = lhs.secondary?.resetDate,
+              let rhsReset = rhs.secondary?.resetDate else {
+            return false
+        }
+        return abs(lhsReset.timeIntervalSince(rhsReset)) <= resetTolerance
+    }
+
+    fileprivate static func isUsageIncrease(
+        _ snapshot: RateLimitSnapshot,
+        after trustedSnapshot: RateLimitSnapshot
+    ) -> Bool {
+        guard let usedPercent = snapshot.secondary?.usedPercent,
+              let trustedUsedPercent = trustedSnapshot.secondary?.usedPercent else {
+            return false
+        }
+        return usedPercent > trustedUsedPercent + usageTolerance
+    }
+
+    fileprivate static func isUsageDecrease(
+        _ snapshot: RateLimitSnapshot,
+        after trustedSnapshot: RateLimitSnapshot
+    ) -> Bool {
+        guard let usedPercent = snapshot.secondary?.usedPercent,
+              let trustedUsedPercent = trustedSnapshot.secondary?.usedPercent else {
+            return false
+        }
+        return usedPercent + usageTolerance < trustedUsedPercent
+    }
+
+    fileprivate static func canCorroborateIncrease(
+        _ snapshot: RateLimitSnapshot,
+        after candidateSnapshot: RateLimitSnapshot
+    ) -> Bool {
+        guard sameKnownWindow(candidateSnapshot, snapshot),
+              let usedPercent = snapshot.secondary?.usedPercent,
+              let candidateUsedPercent = candidateSnapshot.secondary?.usedPercent else {
+            return false
+        }
+        return usedPercent + usageTolerance >= candidateUsedPercent
+    }
+
+    private static func hasSameUsage(
+        _ lhs: RateLimitSnapshot,
+        _ rhs: RateLimitSnapshot
+    ) -> Bool {
+        guard let lhsUsedPercent = lhs.secondary?.usedPercent,
+              let rhsUsedPercent = rhs.secondary?.usedPercent else {
+            return false
+        }
+        return abs(lhsUsedPercent - rhsUsedPercent) <= usageTolerance
     }
 
     fileprivate static func sameCandidateWindow(
@@ -274,6 +478,7 @@ public struct QuotaSnapshotContinuityPolicy: Sendable {
     private static let usageTolerance = 0.001
     private static let resetTolerance: TimeInterval = 5
     private static let scheduledResetGrace: TimeInterval = 60
+    fileprivate static let requiredIncreaseConfirmationCount = 2
 }
 
 public struct QuotaSampleRetentionPolicy: Equatable, Sendable {
@@ -427,6 +632,8 @@ public struct QuotaSampleStore: Sendable {
             var retained = [first]
             var confirmationCandidate: RateLimitSnapshot?
             var retainedConfirmationCount = 0
+            var increaseConfirmationCandidate: RateLimitSnapshot?
+            var retainedIncreaseConfirmationCount = 0
             for sample in sorted.dropFirst() {
                 guard let previous = retained.last else {
                     retained.append(sample)
@@ -435,6 +642,31 @@ public struct QuotaSampleStore: Sendable {
 
                 let snapshot = QuotaSnapshotContinuityPolicy.snapshot(from: sample)
                 var preservesConfirmationEvidence = false
+                var preservesIncreaseConfirmationEvidence = false
+
+                if let activeIncreaseCandidate = increaseConfirmationCandidate {
+                    if QuotaSnapshotContinuityPolicy.canCorroborateIncrease(
+                        snapshot,
+                        after: activeIncreaseCandidate
+                    ) {
+                        retainedIncreaseConfirmationCount += 1
+                        preservesIncreaseConfirmationEvidence = true
+                        if retainedIncreaseConfirmationCount
+                            >= QuotaSnapshotContinuityPolicy.requiredIncreaseConfirmationCount {
+                            clearIncreaseConfirmationCandidate(
+                                &increaseConfirmationCandidate,
+                                count: &retainedIncreaseConfirmationCount
+                            )
+                        } else {
+                            increaseConfirmationCandidate = snapshot
+                        }
+                    } else {
+                        clearIncreaseConfirmationCandidate(
+                            &increaseConfirmationCandidate,
+                            count: &retainedIncreaseConfirmationCount
+                        )
+                    }
+                }
 
                 if let activeConfirmationCandidate = confirmationCandidate {
                     if QuotaSnapshotContinuityPolicy.sameCandidateWindow(activeConfirmationCandidate, snapshot) {
@@ -450,6 +682,21 @@ public struct QuotaSampleStore: Sendable {
                     }
                 }
 
+                if increaseConfirmationCandidate == nil,
+                   preservesIncreaseConfirmationEvidence == false,
+                   QuotaSnapshotContinuityPolicy.sameKnownWindow(
+                       QuotaSnapshotContinuityPolicy.snapshot(from: previous),
+                       snapshot
+                   ),
+                   QuotaSnapshotContinuityPolicy.isUsageIncrease(
+                       snapshot,
+                       after: QuotaSnapshotContinuityPolicy.snapshot(from: previous)
+                   ) {
+                    increaseConfirmationCandidate = snapshot
+                    retainedIncreaseConfirmationCount = 1
+                    preservesIncreaseConfirmationEvidence = true
+                }
+
                 if confirmationCandidate == nil,
                    QuotaSnapshotContinuityPolicy.requiresConfirmation(
                        snapshot,
@@ -461,7 +708,7 @@ public struct QuotaSampleStore: Sendable {
                     preservesConfirmationEvidence = true
                 }
 
-                if preservesConfirmationEvidence
+                if preservesConfirmationEvidence || preservesIncreaseConfirmationEvidence
                     || sample.hasMaterialDifference(from: previous)
                     || sample.capturedAt.timeIntervalSince(previous.capturedAt) >= heartbeatInterval {
                     retained.append(sample)
@@ -484,6 +731,14 @@ public struct QuotaSampleStore: Sendable {
     }
 
     private static func clearConfirmationCandidate(
+        _ candidate: inout RateLimitSnapshot?,
+        count: inout Int
+    ) {
+        candidate = nil
+        count = 0
+    }
+
+    private static func clearIncreaseConfirmationCandidate(
         _ candidate: inout RateLimitSnapshot?,
         count: inout Int
     ) {
