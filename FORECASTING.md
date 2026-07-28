@@ -230,7 +230,7 @@ App:
 cd /Users/ap/Projects/TokenCoffee
 ./Scripts/test.sh
 open -n "/Users/ap/Library/Developer/Xcode/DerivedData/TokenCoffee-fjdhpqoolmkeonflhgzdynyxdxco/Build/Products/Debug/Token Coffee.app" --args --demo
-regionshot --app com.pardeike.TokenCoffee --menu-bar-index 0 --capture-menu --output /tmp/tokencoffee-demo.png
+brrainztools --app com.pardeike.TokenCoffee --menu-bar-index 0 --capture-menu --output /tmp/tokencoffee-demo.png
 ```
 
 Expected app demo result with `TokenUsageForecast 1.1.0`:

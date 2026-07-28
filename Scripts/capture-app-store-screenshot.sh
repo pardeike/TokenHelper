@@ -11,8 +11,8 @@ OUTPUT="$PWD/Screenshot.png"
 PIXEL_WIDTH=1280
 PIXEL_HEIGHT=800
 
-command -v regionshot >/dev/null 2>&1 || {
-  printf 'error: regionshot is required on PATH\n' >&2
+command -v brrainztools >/dev/null 2>&1 || {
+  printf 'error: brrainztools is required on PATH\n' >&2
   exit 1
 }
 
@@ -43,7 +43,7 @@ esac
 osascript -e "tell application id \"$BUNDLE_ID\" to activate" >/dev/null 2>&1 || true
 
 attempts=0
-while ! regionshot --app "$BUNDLE_ID" --list-menu-bar-items >/dev/null 2>&1; do
+while ! brrainztools --app "$BUNDLE_ID" --list-menu-bar-items >/dev/null 2>&1; do
   attempts=$((attempts + 1))
   if [ "$attempts" -ge 20 ]; then
     printf 'error: %s did not expose a menu bar item in time\n' "$BUNDLE_ID" >&2
@@ -52,15 +52,15 @@ while ! regionshot --app "$BUNDLE_ID" --list-menu-bar-items >/dev/null 2>&1; do
   sleep 0.25
 done
 
-if regionshot --app "$BUNDLE_ID" --list-elements >/dev/null 2>&1; then
-  regionshot --app "$BUNDLE_ID" --menu-bar-index "$MENU_BAR_INDEX" --press >/dev/null
+if brrainztools --app "$BUNDLE_ID" --list-elements >/dev/null 2>&1; then
+  brrainztools --app "$BUNDLE_ID" --menu-bar-index "$MENU_BAR_INDEX" --press >/dev/null
   sleep 0.2
 fi
 
-regionshot --app "$BUNDLE_ID" --menu-bar-index "$MENU_BAR_INDEX" --press >/dev/null
+brrainztools --app "$BUNDLE_ID" --menu-bar-index "$MENU_BAR_INDEX" --press >/dev/null
 sleep 0.4
 
-regionshot --app "$BUNDLE_ID" --list-elements >/dev/null 2>&1 || {
+brrainztools --app "$BUNDLE_ID" --list-elements >/dev/null 2>&1 || {
   printf 'error: %s panel did not open\n' "$BUNDLE_ID" >&2
   exit 1
 }
@@ -82,7 +82,7 @@ RECT=$(
 
 set -- $RECT
 rm -f "$OUTPUT"
-regionshot "$1" "$2" "$3" "$4" --output "$OUTPUT" >/dev/null
+brrainztools "$1" "$2" "$3" "$4" --output "$OUTPUT" >/dev/null
 
 ACTUAL_WIDTH=$(sips -g pixelWidth "$OUTPUT" 2>/dev/null | awk '/pixelWidth:/ { print $2 }')
 ACTUAL_HEIGHT=$(sips -g pixelHeight "$OUTPUT" 2>/dev/null | awk '/pixelHeight:/ { print $2 }')
