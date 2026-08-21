@@ -1,10 +1,13 @@
 import AppKit
+import Combine
 import TokenCoffeeCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var model: AppModel?
     private var statusPanelController: StatusPanelController?
+    private var screenBlankingController: ScreenBlankingController?
+    private var screenBlankingCancellable: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -28,14 +31,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             demoScenario: demoScenario,
             startsInDemoMode: startsInDemoMode
         )
+        let screenBlankingController = ScreenBlankingController()
         self.model = model
         self.statusPanelController = StatusPanelController(model: model)
+        self.screenBlankingController = screenBlankingController
+        self.screenBlankingCancellable = model.$powerMode
+            .sink { [weak screenBlankingController] mode in
+                Task { @MainActor in
+                    screenBlankingController?.setPowerMode(mode)
+                }
+            }
         DispatchQueue.main.async { [weak model] in
             model?.start()
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        screenBlankingCancellable?.cancel()
+        screenBlankingController?.shutdown()
         model?.shutdown()
     }
 
