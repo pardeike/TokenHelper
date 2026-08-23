@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TokenCoffeeCore
 import UniformTypeIdentifiers
 
 @MainActor
@@ -17,6 +18,11 @@ enum PanelControlMenu {
 
         menu.addItem(actionItem(title: "About") {
             showAbout()
+        })
+        menu.addItem(.separator())
+
+        menu.addItem(screenBlackoutMenuItem(selectedDelay: model.screenBlackoutDelay) { delay in
+            model.setScreenBlackoutDelay(delay)
         })
         menu.addItem(.separator())
 
@@ -50,8 +56,45 @@ enum PanelControlMenu {
         menu.popUp(positioning: nil, at: popupPoint, in: anchor)
     }
 
+    static func screenBlackoutMenuItem(
+        selectedDelay: ScreenBlackoutDelay,
+        onSelect: @escaping (ScreenBlackoutDelay) -> Void
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: "Black out Screen", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "Black out Screen")
+        submenu.autoenablesItems = false
+
+        for delay in ScreenBlackoutDelay.allCases {
+            let option = actionItem(title: menuTitle(for: delay)) {
+                onSelect(delay)
+            }
+            option.state = delay == selectedDelay ? .on : .off
+            submenu.addItem(option)
+        }
+
+        item.submenu = submenu
+        return item
+    }
+
     private static func actionItem(title: String, handler: @escaping () -> Void) -> NSMenuItem {
         ActionMenuItem(title: title, handler: handler)
+    }
+
+    private static func menuTitle(for delay: ScreenBlackoutDelay) -> String {
+        switch delay {
+        case .off:
+            "Off"
+        case .oneMinute:
+            "1min idle"
+        case .twoMinutes:
+            "2min idle"
+        case .fiveMinutes:
+            "5min idle"
+        case .tenMinutes:
+            "10min idle"
+        case .oneHour:
+            "1h idle"
+        }
     }
 
     private static func exportForecastDiagnostics(model: AppModel) {

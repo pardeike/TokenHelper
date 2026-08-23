@@ -10,6 +10,34 @@ public enum PowerSessionMode: String, CaseIterable, Codable, Equatable, Sendable
     public var id: String { rawValue }
 }
 
+public enum ScreenBlackoutDelay: String, CaseIterable, Codable, Equatable, Sendable, Identifiable {
+    case off
+    case oneMinute
+    case twoMinutes
+    case fiveMinutes
+    case tenMinutes
+    case oneHour
+
+    public var id: String { rawValue }
+
+    public var inactivityThreshold: TimeInterval? {
+        switch self {
+        case .off:
+            nil
+        case .oneMinute:
+            60
+        case .twoMinutes:
+            2 * 60
+        case .fiveMinutes:
+            5 * 60
+        case .tenMinutes:
+            10 * 60
+        case .oneHour:
+            60 * 60
+        }
+    }
+}
+
 public enum PowerAssertionKind: Equatable, Sendable {
     case preventIdleSystemSleep
     case preventIdleDisplaySleep
@@ -168,6 +196,7 @@ public enum TokenCoffeeDefaults {
     public static let domain = "com.pardeike.TokenCoffee"
     public static let closedDisplayModeEnabledKey = "closedDisplayModeEnabled"
     public static let preferredPowerModeKey = "preferredPowerMode"
+    public static let screenBlackoutDelayKey = "screenBlackoutDelay"
 
     public static func setClosedDisplayModeEnabled(_ enabled: Bool, userDefaults: UserDefaults = .standard) {
         userDefaults.set(enabled, forKey: closedDisplayModeEnabledKey)
@@ -183,5 +212,22 @@ public enum TokenCoffeeDefaults {
 
     public static func setPreferredPowerMode(_ mode: PowerSessionMode, userDefaults: UserDefaults = .standard) {
         userDefaults.set(mode.rawValue, forKey: preferredPowerModeKey)
+    }
+
+    public static func preferredScreenBlackoutDelay(
+        userDefaults: UserDefaults = .standard
+    ) -> ScreenBlackoutDelay {
+        guard let rawValue = userDefaults.string(forKey: screenBlackoutDelayKey),
+              let delay = ScreenBlackoutDelay(rawValue: rawValue) else {
+            return .oneMinute
+        }
+        return delay
+    }
+
+    public static func setPreferredScreenBlackoutDelay(
+        _ delay: ScreenBlackoutDelay,
+        userDefaults: UserDefaults = .standard
+    ) {
+        userDefaults.set(delay.rawValue, forKey: screenBlackoutDelayKey)
     }
 }

@@ -35,10 +35,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.model = model
         self.statusPanelController = StatusPanelController(model: model)
         self.screenBlankingController = screenBlankingController
-        self.screenBlankingCancellable = model.$powerMode
-            .sink { [weak screenBlankingController] mode in
+        self.screenBlankingCancellable = Publishers.CombineLatest(
+            model.$powerMode,
+            model.$screenBlackoutDelay
+        )
+            .sink { [weak screenBlankingController] configuration in
+                let (powerMode, blackoutDelay) = configuration
                 Task { @MainActor in
-                    screenBlankingController?.setPowerMode(mode)
+                    screenBlankingController?.setConfiguration(
+                        powerMode: powerMode,
+                        blackoutDelay: blackoutDelay
+                    )
                 }
             }
         DispatchQueue.main.async { [weak model] in

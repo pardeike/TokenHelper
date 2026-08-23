@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.4
+
+- Added an optional multi-display blackout while `Screen on` is active, dismissed immediately by keyboard or mouse input.
+- Added persistent popup-menu choices for turning blackout off or starting it after 1, 2, 5, 10, or 60 idle minutes.
+
 ## 1.0.3
 
 - Made the menu bar icon toggle the panel on macOS 27 beta without leaving the status item highlighted.

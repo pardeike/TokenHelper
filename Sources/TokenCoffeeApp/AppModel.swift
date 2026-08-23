@@ -14,6 +14,7 @@ enum CodexSignInState: Equatable {
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var powerMode: PowerSessionMode = .off
+    @Published private(set) var screenBlackoutDelay: ScreenBlackoutDelay = .oneMinute
     @Published private(set) var powerErrorMessage: String?
     @Published private(set) var quotaSnapshot: RateLimitSnapshot?
     @Published private(set) var quotaSamples: [QuotaSample] = []
@@ -60,6 +61,7 @@ final class AppModel: ObservableObject {
         self.startsInDemoMode = startsInDemoMode && demoScenario != nil
         self.isDemoModeEnabled = self.startsInDemoMode
         self.powerMode = self.startsInDemoMode ? .keepAwakeDisplay : TokenCoffeeDefaults.preferredPowerMode()
+        self.screenBlackoutDelay = TokenCoffeeDefaults.preferredScreenBlackoutDelay()
     }
 
     var referenceDate: Date {
@@ -157,6 +159,14 @@ final class AppModel: ObservableObject {
         powerMode = mode
         TokenCoffeeDefaults.setPreferredPowerMode(mode)
         applyPowerConfiguration()
+    }
+
+    func setScreenBlackoutDelay(_ delay: ScreenBlackoutDelay) {
+        guard screenBlackoutDelay != delay else {
+            return
+        }
+        screenBlackoutDelay = delay
+        TokenCoffeeDefaults.setPreferredScreenBlackoutDelay(delay)
     }
 
     func refreshQuota() {

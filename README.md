@@ -47,7 +47,7 @@ Click the cup icon in the menu bar.
 
 - `Off` releases Token Coffee power assertions and restores closed-lid sleep behavior.
 - `Mac awake` keeps the Mac awake and allows the display to sleep.
-- `Screen on` keeps both the Mac and display awake, then blacks out every connected display after one minute without keyboard or mouse input. Any input removes the blackout immediately.
+- `Screen on` keeps both the Mac and display awake. The popup menu can turn screen blackout off or apply it after 1, 2, 5, 10, or 60 idle minutes. Any keyboard or mouse input removes the blackout immediately.
 
 When either awake mode is active, closing the lid should not put the Mac to sleep.
 

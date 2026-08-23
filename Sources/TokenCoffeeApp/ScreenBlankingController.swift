@@ -13,17 +13,14 @@ protocol ScreenBlackoutPresenting: AnyObject {
 
 @MainActor
 final class ScreenBlankingController: NSObject {
-    static let defaultInactivityThreshold: TimeInterval = 60
-
-    private let inactivityThreshold: TimeInterval
     private let checkInterval: TimeInterval
     private let idleTimeProvider: () -> TimeInterval
     private let presenter: ScreenBlackoutPresenting
     private var timer: Timer?
     private var isEnabled = false
+    private var inactivityThreshold: TimeInterval?
 
     init(
-        inactivityThreshold: TimeInterval = defaultInactivityThreshold,
         checkInterval: TimeInterval = 0.25,
         idleTimeProvider: @escaping () -> TimeInterval = {
             CGEventSource.secondsSinceLastEventType(
@@ -33,18 +30,24 @@ final class ScreenBlankingController: NSObject {
         },
         presenter: ScreenBlackoutPresenting? = nil
     ) {
-        self.inactivityThreshold = inactivityThreshold
         self.checkInterval = checkInterval
         self.idleTimeProvider = idleTimeProvider
         self.presenter = presenter ?? ScreenBlackoutPresenter()
         super.init()
     }
 
-    func setPowerMode(_ mode: PowerSessionMode) {
-        setEnabled(mode == .keepAwakeDisplay)
+    func setConfiguration(powerMode: PowerSessionMode, blackoutDelay: ScreenBlackoutDelay) {
+        inactivityThreshold = blackoutDelay.inactivityThreshold
+        let shouldEnable = powerMode == .keepAwakeDisplay && inactivityThreshold != nil
+
+        if isEnabled != shouldEnable {
+            setEnabled(shouldEnable)
+        } else if shouldEnable {
+            checkNow()
+        }
     }
 
-    func setEnabled(_ enabled: Bool) {
+    private func setEnabled(_ enabled: Bool) {
         guard isEnabled != enabled else {
             return
         }
@@ -66,7 +69,8 @@ final class ScreenBlankingController: NSObject {
     }
 
     func checkNow() {
-        guard isEnabled else {
+        guard isEnabled,
+              let inactivityThreshold else {
             presenter.hide()
             return
         }

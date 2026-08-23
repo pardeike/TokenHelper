@@ -48,6 +48,40 @@ final class PowerSessionControllerTests: XCTestCase {
         XCTAssertEqual(TokenCoffeeDefaults.preferredPowerMode(userDefaults: defaults), .off)
     }
 
+    func testPreferredScreenBlackoutDelayDefaultsToOneMinute() {
+        let (defaults, suiteName) = temporaryUserDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(TokenCoffeeDefaults.preferredScreenBlackoutDelay(userDefaults: defaults), .oneMinute)
+    }
+
+    func testPreferredScreenBlackoutDelayRoundTrips() {
+        let (defaults, suiteName) = temporaryUserDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        TokenCoffeeDefaults.setPreferredScreenBlackoutDelay(.oneHour, userDefaults: defaults)
+
+        XCTAssertEqual(TokenCoffeeDefaults.preferredScreenBlackoutDelay(userDefaults: defaults), .oneHour)
+    }
+
+    func testInvalidPreferredScreenBlackoutDelayDefaultsToOneMinute() {
+        let (defaults, suiteName) = temporaryUserDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set("not-a-delay", forKey: TokenCoffeeDefaults.screenBlackoutDelayKey)
+
+        XCTAssertEqual(TokenCoffeeDefaults.preferredScreenBlackoutDelay(userDefaults: defaults), .oneMinute)
+    }
+
+    func testScreenBlackoutDelayThresholds() {
+        XCTAssertNil(ScreenBlackoutDelay.off.inactivityThreshold)
+        XCTAssertEqual(ScreenBlackoutDelay.oneMinute.inactivityThreshold, 60)
+        XCTAssertEqual(ScreenBlackoutDelay.twoMinutes.inactivityThreshold, 120)
+        XCTAssertEqual(ScreenBlackoutDelay.fiveMinutes.inactivityThreshold, 300)
+        XCTAssertEqual(ScreenBlackoutDelay.tenMinutes.inactivityThreshold, 600)
+        XCTAssertEqual(ScreenBlackoutDelay.oneHour.inactivityThreshold, 3_600)
+    }
+
     private func temporaryUserDefaults() -> (UserDefaults, String) {
         let suiteName = "com.pardeike.TokenCoffee.tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
