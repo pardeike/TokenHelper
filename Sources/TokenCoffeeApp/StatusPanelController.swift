@@ -3,6 +3,12 @@ import Combine
 import SwiftUI
 import TokenCoffeeCore
 
+private enum StatusPanelAction {
+    case open
+    case focus
+    case close
+}
+
 @MainActor
 final class StatusPanelController: NSObject, NSWindowDelegate {
     private let model: AppModel
@@ -10,6 +16,8 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
     private let panel: NSPanel
     private var cancellables: Set<AnyCancellable> = []
     private var shouldIgnoreNextExpandedInterfaceEnd = false
+    private var pendingExpandedInterfaceAction: StatusPanelAction?
+    private var panelWasFocused = false
     private var ignoreStatusItemActionUntil: Date?
 
     init(model: AppModel) {
@@ -77,16 +85,59 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
     }
 
     private func togglePanelFromStatusItem() {
-        if panel.isVisible {
-            closePanelWithoutCancellingStatusItem()
-            return
-        }
+        performPanelAction(panelActionForStatusItem())
+    }
 
-        openPanel()
+    private func panelActionForStatusItem() -> StatusPanelAction {
+        guard panel.isVisible else {
+            return .open
+        }
+        return panelWasFocused ? .close : .focus
+    }
+
+    private func performPanelAction(_ action: StatusPanelAction) {
+        switch action {
+        case .open:
+            openPanel()
+        case .focus:
+            focusPanel()
+        case .close:
+            closePanelWithoutCancellingStatusItem()
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
+        panelWasFocused = false
         model.setPanelVisible(false)
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        panelWasFocused = true
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        if isStatusItemInteractionInProgress {
+            return
+        }
+        panelWasFocused = false
+    }
+
+    private var isStatusItemInteractionInProgress: Bool {
+        guard let button = statusItem.button else {
+            return false
+        }
+        if button.isHighlighted {
+            return true
+        }
+        if NSEvent.pressedMouseButtons & 1 != 0,
+           let buttonWindow = button.window {
+            let buttonFrameInWindow = button.convert(button.bounds, to: nil)
+            let buttonFrameOnScreen = buttonWindow.convertToScreen(buttonFrameInWindow)
+            if buttonFrameOnScreen.contains(NSEvent.mouseLocation) {
+                return true
+            }
+        }
+        return false
     }
 
     private func closePanel() {
@@ -99,12 +150,18 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
 
     private func openPanel() {
         positionPanel()
-        NSApp.activate()
-        panel.makeKeyAndOrderFront(nil)
+        focusPanel()
         model.setPanelVisible(true)
     }
 
+    private func focusPanel() {
+        panelWasFocused = true
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
     private func closePanelWithoutCancellingStatusItem() {
+        panelWasFocused = false
         panel.orderOut(nil)
         model.setPanelVisible(false)
     }
@@ -282,7 +339,7 @@ extension StatusPanelController {
         didBeginExpandedInterfaceSession expandedInterfaceSession: NSObject
     ) {
         suppressStatusItemActionFallback()
-        togglePanelFromStatusItem()
+        pendingExpandedInterfaceAction = panelActionForStatusItem()
         cancelExpandedInterfaceSession(expandedInterfaceSession)
     }
 
@@ -290,9 +347,16 @@ extension StatusPanelController {
     func statusItemDidEndExpandedInterfaceSession(_ statusItem: NSStatusItem, animated: Bool) {
         if shouldIgnoreNextExpandedInterfaceEnd {
             shouldIgnoreNextExpandedInterfaceEnd = false
+            if let action = pendingExpandedInterfaceAction {
+                pendingExpandedInterfaceAction = nil
+                DispatchQueue.main.async { [weak self] in
+                    self?.performPanelAction(action)
+                }
+            }
             return
         }
 
+        pendingExpandedInterfaceAction = nil
         closePanelWithoutCancellingStatusItem()
     }
 }

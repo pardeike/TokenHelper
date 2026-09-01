@@ -70,6 +70,8 @@ struct DashboardView: View {
             .help("Menu")
         }
         .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .gesture(WindowDragGesture())
     }
 
     @ViewBuilder

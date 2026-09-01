@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.5
+
+- Restored reliable menu-item toggling, immediate window focus, and title-area dragging on current macOS betas.
+
 ## 1.0.4
 
 - Added an optional multi-display blackout while `Screen on` is active, dismissed immediately by keyboard or mouse input.
